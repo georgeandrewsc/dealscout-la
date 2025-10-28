@@ -51,12 +51,21 @@ if uploaded:
     gdf = gpd.GeoDataFrame(mls, geometry='geometry', crs="EPSG:4326")
 
     # Join with zoning
-    zoning = gpd.read_file("Zoning.geojson").to_crs("EPSG:4326")
-    joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
-    zoning_cols = [c for c in joined.columns if 'Zoning' in c and c != 'Zoning']
-    zoning_field = zoning_cols[0] if zoning_cols else 'Zoning'
-    joined['Zoning'] = joined[zoning_field].fillna("Outside LA")
-    joined['zone_code'] = joined['Zoning'].str.split('-').str[0].str.upper()
+zoning = gpd.read_file("Zoning.geojson").to_crs("EPSG:4326")
+joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+
+# Auto-detect ANY column from zoning file
+new_cols = [c for c in joined.columns if c not in gdf.columns]
+if not new_cols:
+    st.error("No columns from Zoning.geojson found. Check file.")
+    st.stop()
+
+# Pick the first new column as zoning (you can change later)
+zoning_field = new_cols[0]
+st.write(f"Using zoning field: **{zoning_field}**")
+
+joined['Zoning'] = joined[zoning_field].fillna("Outside LA")
+joined['zone_code'] = joined['Zoning'].str.split('-').str[0].str.upper()
 
     # Zoning map
     sqft_map = {
