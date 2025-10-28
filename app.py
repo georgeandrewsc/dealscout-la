@@ -69,11 +69,11 @@ joined['zone_code'] = joined['Zoning'].str.split('-').str[0].str.upper()
 
     # Zoning map
     sqft_map = {
-        'A1':108900,'A2':43560,'RE40':40000,'RE20':20000,'RE15':15000,'RE11':11000,'RE9':9000,
-        'RS':7500,'R1':5000,'RU':3500,'RZ2.5':2500,'RZ3':3000,'RZ4':4000,'RW1':2300,'R2':2500,'RW2':2300,
-        'RD1.5':1500,'RD2':2000,'RD3':3000,'RD4':4000,'RD5':5000,'RD6':6000,
-        'RMP':20000,'R3':800,'RAS3':800,'R4':400,'RAS4':400,'R5':200,
-    }
+    'A1': 108900, 'A2': 43560, 'RE40': 40000, 'RE20': 20000, 'RE15': 15000, 'RE11': 11000, 'RE9': 9000,
+    'RS': 7500, 'R1': 5000, 'RU': 3500, 'RZ2.5': 2500, 'RZ3': 3000, 'RZ4': 4000, 'RW1': 2300, 'R2': 2500, 'RW2': 2300,
+    'RD1.5': 1500, 'RD2': 2000, 'RD3': 3000, 'RD4': 4000, 'RD5': 5000, 'RD6': 6000,
+    'RMP': 20000, 'R3': 800, 'RAS3': 800, 'R4': 400, 'RAS4': 400, 'R5': 200,
+}
     joined['sqft_per_unit'] = joined['zone_code'].map(sqft_map).fillna(0)
     joined['max_units'] = (joined['lot_sqft'] / joined['sqft_per_unit'].replace(0,1)).replace([np.inf],0)
     joined['price_per_unit'] = (joined['price'] / joined['max_units'].replace(0,1)).replace([np.inf],np.nan)
