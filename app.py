@@ -50,17 +50,28 @@ if uploaded:
     gdf = gpd.GeoDataFrame(mls, geometry='geometry', crs="EPSG:4326")
 
     # Join with zoning
-    try:
-        zoning = gpd.read_file("Zoning.geojson").to_crs("EPSG:4326")
-        joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
-        new_cols = [c for c in joined.columns if c not in gdf.columns]
-        if not new_cols:
-            st.error("No zoning data found in file.")
-            st.stop()
-        zoning_field = new_cols[0]
-        st.write(f"Using zoning field: **{zoning_field}**")
-        joined['Zoning'] = joined[zoning_field].fillna("Outside LA")
-        joined['zone_code'] = joined['Zoning'].str.split('-').str[0].str.upper()
-    except Exception as e:
-        st.error(f"Zoning file error: {e}")
+try:
+    zoning = gpd.read_file("Zoning.geojson").to_crs("EPSG:4326")
+    joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+    
+    # Find the actual zoning code column (common names)
+    possible_cols = ['ZONE_CLASS', 'ZONING', 'ZONE', 'LAND_USE', 'ZONECODE', 'ZONE_CODE']
+    zoning_field = None
+    for col in possible_cols:
+        if col in zoning.columns:
+            zoning_field = col
+            break
+    
+    if zoning_field is None:
+        st.error("No zoning code column found in Zoning.geojson. Expected one of: " + ", ".join(possible_cols))
+        st.stop()
+    
+    st.write(f"Using zoning field: **{zoning_field}**")
+    
+    # Use the correct column
+    joined['Zoning'] = joined[zoning_field].fillna("Outside LA")
+    joined['zone_code'] = joined['Zoning'].str.split('-').str[0].str.upper()
+except Exception as e:
+    st.error(f"Zoning error: {e}")
+    st.stop()
 
