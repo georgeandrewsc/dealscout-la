@@ -52,7 +52,7 @@ if uploaded:
     # Join with zoning
 try:
     zoning = gpd.read_file("Zoning.geojson").to_crs("EPSG:4326")
-    joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+    joined = gpd.sjoin(gdf_mls, zoning, how="left", predicate="within")
     
     # Find the actual zoning code column (common names)
     possible_cols = ['ZONE_CLASS', 'ZONING', 'ZONE', 'LAND_USE', 'ZONECODE', 'ZONE_CODE']
