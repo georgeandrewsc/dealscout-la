@@ -99,9 +99,51 @@ mls["geometry"] = mls.apply(
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
-# REPROJECT TO MATCH ZONING CRS (CRITICAL!)
-gdf = gdf.to_crs(zoning.crs)
-st.caption(f"Reprojected MLS points to CRS: **{gdf.crs}**")
+# ---- LOAD ZONING FIRST ---------------------------------------------------
+zoning_path = "Zoning.geojson"
+if not os.path.exists(zoning_path):
+    st.error(f"`{zoning_path}` not found – place it next to `app.py`.")
+    st.stop()
+
+zoning = gpd.read_file(zoning_path)
+
+# ---- NOW REPROJECT MLS TO MATCH ZONING CRS -------------------------------
+try:
+    gdf = gdf.to_crs(zoning.crs)
+    st.caption(f"Reprojected MLS points to CRS: **{gdf.crs}**")
+except Exception as e:
+    st.error(f"CRS reprojection failed: {e}")
+    st.stop()
+
+# ---- DEBUG: Show zoning columns and pick field ---------------------------
+st.caption("**Zoning.geojson columns** (first 20):")
+st.write(zoning.columns[:20].tolist())
+
+zone_candidates = [c for c in zoning.columns if "zone" in c.lower()]
+if not zone_candidates:
+    st.warning("No column containing **zone** found. Select the zoning code column.")
+    zoning_field = st.selectbox(
+        "Select zoning column",
+        options=zoning.columns.tolist(),
+        index=zoning.columns.get_loc("name") if "name" in zoning.columns else 0
+    )
+else:
+    zoning_field = st.selectbox(
+        "Zoning column (auto-detected)",
+        options=zone_candidates,
+        index=0
+    )
+
+st.success(f"Using zoning field **{zoning_field}**")
+
+# ---- Spatial join --------------------------------------------------------
+joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+joined["Zoning"] = joined[zoning_field].fillna("Outside LA (No Zoning)")
+joined["zone_code"] = joined["Zoning"].str.split("-").str[0].str.upper()
+
+# DEBUG: Show matches
+matched = joined[joined["Zoning"] != "Outside LA (No Zoning)"]
+st.write(f"**{len(matched):,}** listings matched to zoning polygons")
 
 # ------------------------------------------------------------------
 # 5. Load Zoning.geojson  (FINAL – works with ANY column name)
