@@ -99,13 +99,66 @@ mls["geometry"] = mls.apply(
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
-# ---- LOAD ZONING FIRST ---------------------------------------------------
-zoning_path = "Zoning.geojson"
-if not os.path.exists(zoning_path):
-    st.error(f"`{zoning_path}` not found – place it next to `app.py`.")
+# ------------------------------------------------------------------
+# Load Zoning.geojson WITH SESSION STATE (fixes duplicate widget)
+# ------------------------------------------------------------------
+@st.cache_data
+def load_zoning():
+    """Load and cache zoning data."""
+    zoning_path = "Zoning.geojson"
+    if not os.path.exists(zoning_path):
+        st.error(f"`{zoning_path}` not found – place it next to `app.py`.")
+        st.stop()
+    
+    zoning = gpd.read_file(zoning_path)
+    return zoning
+
+zoning = load_zoning()
+st.caption(f"**Zoning.geojson columns** (first 20):")
+st.write(zoning.columns[:20].tolist())
+
+# ---- Find zoning column with session state --------------------------------
+if "zoning_field" not in st.session_state:
+    # First run: auto-detect or default to 'name'
+    zone_candidates = [c for c in zoning.columns if "zone" in c.lower()]
+    if zone_candidates:
+        st.session_state.zoning_field = zone_candidates[0]
+    elif "name" in zoning.columns:
+        st.session_state.zoning_field = "name"
+    else:
+        st.session_state.zoning_field = zoning.columns[0]
+
+# Create selectbox with key to prevent duplicates
+zoning_field = st.selectbox(
+    "Zoning column",
+    options=zoning.columns.tolist(),
+    index=zoning.columns.get_loc(st.session_state.zoning_field),
+    key="zoning_selectbox",  # UNIQUE KEY = NO DUPLICATES
+    help="Select the column containing zoning codes (e.g. R1, RE40, C2)"
+)
+
+# Update session state when user changes selection
+if st.session_state.zoning_field != zoning_field:
+    st.session_state.zoning_field = zoning_field
+
+st.success(f"Using zoning field **{zoning_field}**")
+
+# ---- Reproject MLS to match zoning CRS ------------------------------------
+try:
+    gdf = gdf.to_crs(zoning.crs)
+    st.caption(f"Reprojected MLS points to CRS: **{gdf.crs}**")
+except Exception as e:
+    st.error(f"CRS reprojection failed: {e}")
     st.stop()
 
-zoning = gpd.read_file(zoning_path)
+# ---- Spatial join ---------------------------------------------------------
+joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+joined["Zoning"] = joined[zoning_field].fillna("Outside LA (No Zoning)")
+joined["zone_code"] = joined["Zoning"].str.split("-").str[0].str.upper()
+
+# DEBUG: Show matches
+matched = joined[joined["Zoning"] != "Outside LA (No Zoning)"]
+st.write(f"**{len(matched):,}** listings matched to zoning polygons")
 
 # ---- NOW REPROJECT MLS TO MATCH ZONING CRS -------------------------------
 try:
