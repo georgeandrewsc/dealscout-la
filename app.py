@@ -114,21 +114,38 @@ joined["zone_code"] = joined["Zoning"].str.split("-").str[0].str.upper()
 matched = joined[joined["Zoning"] != "Outside LA (No Zoning)"]
 st.write(f"**{len(matched):,}** listings matched to zoning polygons")
 
-# --- Calculations ---
-sqft_per_unit_map = { "RE40":40000, "RE20":20000, "RE15":15000, "RE11":11000, "RE9":9000, "R1":5000, "RD":2000, "R3":800, "R4":400, "R5":200 }
-joined["sqft_per_unit"] = joined["zone_code"].map(sqft_per_unit_map).fillna(0)
-joined["max_units"] = (joined["lot_sqft"] / joined["sqft_per_unit"].replace(0,1)).replace([float("inf")],0)
-joined["price_per_unit"] = (joined["price"] / joined["max_units"].replace(0,1)).replace([float("inf")], pd.NA)
-joined["SB9_units"] = joined["lot_sqft"].apply(lambda x: 4 if x >= 2400 else 3 if x >= 1000 else pd.NA)
+# --- Full Zoning Calculations ---
+sqft_per_unit_map = {
+    "A1": 108900, "A2": 43560,
+    "RE40": 40000, "RE20": 20000, "RE15": 15000, "RE11": 11000, "RE9": 9000,
+    "RS": 7500, "R1": 5000, "R1V": 5000, "R1F": 5000, "R1R": 5000, "R1H": 5000,
+    "RU": 3500, "RZ2.5": 2500, "RZ3": 3000, "RZ4": 4000,
+    "RW1": 2300, "R2": 2500, "RW2": 2300,
+    "RD1.5": 1500, "RD2": 2000, "RD3": 3000, "RD4": 4000, "RD5": 5000, "RD6": 6000,
+    "RMP": 20000, "R3": 800, "RAS3": 800, "R4": 400, "RAS4": 400, "R5": 200,
+    "C1": 800, "C1.5": 800, "C2": 400, "C4": 400, "C5": 400,
+    "CM": 800, "CR": 400, "MR1": 400, "M1": 400, "MR2": 200, "M2": 200,
+}
 
-outside = joined["sqft_per_unit"] == 0
-joined.loc[outside, ["max_units", "price_per_unit", "SB9_units"]] = pd.NA
+joined["sqft_per_unit"] = joined["zone_code"].map(sqft_per_unit_map).fillna(0)
+joined["max_units"] = (joined["lot_sqft"] / joined["sqft_per_unit"].replace(0, 1)).replace([float("inf")], 0)
+
+# SB-9 Boost for R1
+sb9_mask = joined["zone_code"].isin(["R1", "R1V", "R1F", "R1R", "R1H"])
+joined.loc[sb9_mask, "max_units"] = joined.loc[sb9_mask, "lot_sqft"].apply(
+    lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
+)
+
+# Final $/unit
+joined["price_per_unit"] = (joined["price"] / joined["max_units"].replace(0, 1)).replace([float("inf")], pd.NA)
 
 # --- Filters ---
-filtered = joined.copy()
+max_price_per_unit = st.sidebar.slider("Max $/unit", 0, 20000, 5000, 500)
+zone_filter = st.sidebar.multiselect("Zoning", ["All"] + sorted(joined["zone_code"].unique().tolist()), ["All"])
+
+filtered = joined[joined["price_per_unit"] <= max_price_per_unit].copy()
 if "All" not in zone_filter:
-    filtered = filtered[filtered["zone_code"].isin([z.upper() for z in zone_filter])]
-filtered = filtered[filtered["price_per_unit"] <= max_dollar_per_unit]
+    filtered = filtered[filtered["zone_code"].isin(zone_filter)]
 
 st.write(f"**{len(filtered):,}** after filters")
 
