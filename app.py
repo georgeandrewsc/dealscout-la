@@ -100,22 +100,61 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# Load Zoning.geojson WITH SESSION STATE (fixes duplicate widget)
+# FINAL: Load Zoning + Select Field (ONE TIME ONLY)
 # ------------------------------------------------------------------
 @st.cache_data
 def load_zoning():
-    """Load and cache zoning data."""
     zoning_path = "Zoning.geojson"
     if not os.path.exists(zoning_path):
         st.error(f"`{zoning_path}` not found – place it next to `app.py`.")
         st.stop()
-    
-    zoning = gpd.read_file(zoning_path)
-    return zoning
+    return gpd.read_file(zoning_path)
 
+# Load once
 zoning = load_zoning()
-st.caption(f"**Zoning.geojson columns** (first 20):")
-st.write(zoning.columns[:20].tolist())
+
+# Show columns once
+if "zoning_columns_shown" not in st.session_state:
+    st.caption("**Zoning.geojson columns** (first 20):")
+    st.write(zoning.columns[:20].tolist())
+    st.session_state.zoning_columns_shown = True
+
+# --- ONLY SHOW SELECTBOX ONCE ---
+if "zoning_field" not in st.session_state:
+    # First run: auto-detect or default
+    zone_candidates = [c for c in zoning.columns if "zone" in c.lower()]
+    default = zone_candidates[0] if zone_candidates else ("name" if "name" in zoning.columns else zoning.columns[0])
+    st.session_state.zoning_field = default
+
+# SINGLE selectbox with unique key
+zoning_field = st.selectbox(
+    "Zoning column",
+    options=zoning.columns.tolist(),
+    index=zoning.columns.get_loc(st.session_state.zoning_field),
+    key="zoning_column_select",  # UNIQUE KEY
+    help="Pick the column with zoning codes (e.g. R1, RE40)"
+)
+
+# Sync session state
+st.session_state.zoning_field = zoning_field
+st.success(f"Using zoning field **{zoning_field}**")
+
+# --- Reproject MLS to zoning CRS ---
+try:
+    gdf = gdf.to_crs(zoning.crs)
+    st.caption(f"Reprojected MLS points to CRS: **{gdf.crs}**")
+except Exception as e:
+    st.error(f"CRS reprojection failed: {e}")
+    st.stop()
+
+# --- Spatial join ---
+joined = gpd.sjoin(gdf, zoning, how="left", predicate="within")
+joined["Zoning"] = joined[zoning_field].fillna("Outside LA (No Zoning)")
+joined["zone_code"] = joined["Zoning"].str.split("-").str[0].str.upper()
+
+# Show matches
+matched = joined[joined["Zoning"] != "Outside LA (No Zoning)"]
+st.write(f"**{len(matched):,}** listings matched to zoning polygons")
 
 # ---- Find zoning column with session state --------------------------------
 if "zoning_field" not in st.session_state:
