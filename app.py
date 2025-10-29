@@ -89,9 +89,7 @@ mls["address"] = (
     .str.replace(r"\s+", " ", regex=True)
 )
 
-# ------------------------------------------------------------------
-# 4. Geometry & drop rows without location/price/lot
-# ------------------------------------------------------------------
+# ---- Geometry ------------------------------------------------------------
 mls["geometry"] = mls.apply(
     lambda r: Point(r.lon, r.lat)
     if pd.notnull(r.lon) and pd.notnull(r.lat)
@@ -100,6 +98,10 @@ mls["geometry"] = mls.apply(
 )
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
+
+# REPROJECT TO MATCH ZONING CRS (CRITICAL!)
+gdf = gdf.to_crs(zoning.crs)
+st.caption(f"Reprojected MLS points to CRS: **{gdf.crs}**")
 
 # ------------------------------------------------------------------
 # 5. Load Zoning.geojson  (FINAL – works with ANY column name)
