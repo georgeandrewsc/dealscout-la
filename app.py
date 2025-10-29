@@ -102,31 +102,41 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. Load Zoning.geojson  (FIXED – works with ANY column name)
+# 5. Load Zoning.geojson  (FINAL – works with ANY column name)
 # ------------------------------------------------------------------
 zoning_path = "Zoning.geojson"
 if not os.path.exists(zoning_path):
     st.error(f"`{zoning_path}` not found – place it next to `app.py`.")
     st.stop()
 
-# Read the file
 zoning = gpd.read_file(zoning_path).to_crs("EPSG:4326")
 
-# ---- DEBUG: show what columns actually exist ----
+# ---- DEBUG: show the actual columns ----
 st.caption("**Zoning.geojson columns** (first 20):")
 st.write(zoning.columns[:20].tolist())
 
-# ---- Find a column that contains the word "zone" (case-insensitive) ----
+# ---- 1. Try to auto-detect a column that contains "zone" ----
 zone_candidates = [c for c in zoning.columns if "zone" in c.lower()]
-if not zone_candidates:
-    st.error(
-        "No column containing the word **zone** was found in `Zoning.geojson`.\n"
-        "Please rename one of the columns to include the word **zone** (e.g. `ZONE_CLASS`, `ZONING`, `ZONE_CODE`, …) "
-        "or add the exact column name to the list below."
-    )
-    st.stop()
 
-zoning_field = zone_candidates[0]          # pick the first match
+# ---- 2. If nothing found, let the user pick ANY column ----
+if not zone_candidates:
+    st.warning(
+        "No column containing **zone** was found. "
+        "Please **select the column that holds the zoning code** (usually `name` or similar)."
+    )
+    zoning_field = st.selectbox(
+        "Select zoning column",
+        options=zoning.columns.tolist(),
+        index=zoning.columns.get_loc("name") if "name" in zoning.columns else 0
+    )
+else:
+    # Auto-pick the first match, but still let the user override
+    zoning_field = st.selectbox(
+        "Zoning column (auto-detected)",
+        options=zone_candidates,
+        index=0
+    )
+
 st.success(f"Using zoning field **{zoning_field}**")
 # ------------------------------------------------------------------
 # 6. Spatial join
