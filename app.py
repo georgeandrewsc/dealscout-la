@@ -1,6 +1,6 @@
 # --------------------------------------------------------------
 # DealScout LA — City of Los Angeles ONLY
-# FINAL: 1234 S Cochran Ave + REAL ZONING + NO SYNTAX ERROR
+# FINAL: Auto-picks zoning column + NO .str ERROR
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -94,10 +94,14 @@ if not st.session_state.get("zoning_processed", False):
     zoning = load_zoning()
     st.write("**Zoning.geojson columns:**", zoning.columns.tolist())
     
+    # AUTO-PICK COLUMN WITH "zone" IN NAME
+    zone_cols = [c for c in zoning.columns if "zone" in c.lower() and c != "name"]
+    default = zone_cols[0] if zone_cols else "name" if "name" in zoning.columns else zoning.columns[0]
+    
     zoning_field = st.selectbox(
         "Select Zoning Code Column (e.g., ZONE_CLASS, ZONING, ZONECODE)",
         options=zoning.columns.tolist(),
-        index=0,
+        index=zoning.columns.get_loc(default),
         key="zoning_column_select"
     )
     
@@ -135,8 +139,8 @@ sqft_per_unit_map = {
     'MR1':400,'M1':400,'MR2':200,'M2':200,
 }
 
-# --- Extract base code (e.g., RD1.5-1 → RD1.5) ---
-la_city_only["zone_code"] = la_city_only["Zoning"].str.split('-').str[0].str.upper()
+# --- Extract base code ---
+la_city_only["zone_code"] = la_city_only["Zoning"].astype(str).str.split('-').str[0].str.upper()
 la_city_only["sqft_per_unit"] = la_city_only["zone_code"].map(sqft_per_unit_map).fillna(5000)
 la_city_only["max_units"] = (la_city_only["lot_sqft"] / la_city_only["sqft_per_unit"]).clip(1, 20)
 
@@ -188,7 +192,7 @@ if not filtered.empty:
 else:
     st.warning("No deals match filters. Try increasing Max $/unit.")
 
-# --- DOWNLOAD CSV (with commas) ---
+# --- DOWNLOAD CSV ---
 download_df = filtered[["address", "price", "price_per_unit", "max_units", "zone_code"]].copy()
 download_df.columns = ["Address", "Price", "$/Unit", "Max Units", "Zoning"]
 download_df["Price"] = download_df["Price"].apply(lambda x: f"${x:,.0f}")
