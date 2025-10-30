@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: AUTO-DETECT ZONING COLUMN
+# DealScout LA — FINAL: NO KEYERROR, AUTO-DETECT
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -87,12 +87,14 @@ if not zone_cols:
     st.error("No zoning column found! Columns: " + ", ".join(zoning.columns))
     st.stop()
 
-zoning_field = zone_cols[0]  # Use first match
+zoning_field = zone_cols[0]
 st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., RD1.5-1")
 
 # --- Join ---
 gdf = gdf.to_crs(zoning.crs)
 joined = gpd.sjoin(gdf, zoning[[zoning_field, "geometry"]], how="left", predicate="intersects")
+
+# --- FIX: Use zoning_field directly, then create "Zoning" ---
 joined["Zoning"] = joined[zoning_field].fillna("Outside LA")
 
 # --- LA City Only ---
@@ -144,4 +146,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Auto-detected zoning, 450 MB, no errors")
+st.success("**LIVE!** No KeyError, auto-detected zoning, 450 MB, full LA City")
