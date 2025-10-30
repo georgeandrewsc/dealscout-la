@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: sjoin FIX
+# DealScout LA — FINAL: YOUR ORIGINAL sqft_map (FULL)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -106,10 +106,15 @@ if la_city.empty:
 
 st.write(f"**{len(la_city):,}** LA City deals")
 
-# --- Max Units ---
+# --- YOUR ORIGINAL FULL sqft_map ---
 sqft_map = {
-    'RD1.5':1500, 'RD2':2000, 'R3':800, 'R4':400, 'R5':200,
-    'R1':5000, 'R2':2500, 'C2':400, 'C1':800, 'CM':800
+    'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
+    'RD1.5':1500, 'RD2':2000, 'R3':800, 'RAS3':800, 'R4':400, 'RAS4':400, 'R5':200,
+    'RE40':40000, 'RE20':20000, 'RE15':15000, 'RE11':11000, 'RE9':9000,
+    'RS':7500, 'R1':5000, 'R1V':5000, 'R1F':5000, 'R1R':5000, 'R1H':5000,
+    'RU':3500, 'RZ2.5':2500, 'RZ3':3000, 'RZ4':4000, 'RW1':2300, 'R2':2500, 'RW2':2300,
+    'RMP':20000, 'MR1':400, 'M1':400, 'MR2':200, 'M2':200,
+    'A1':108900, 'A2':43560
 }
 la_city["base"] = la_city["Zoning"].str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
@@ -124,4 +129,27 @@ filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # --- Map ---
 if not filtered.empty:
-    m = folium.Map([34.05, -118.24], zoom_start=11
+    m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
+    for _, r in filtered.iterrows():
+        color = "lime" if r.price_per_unit < 200000 else "orange" if r.price_per_unit < 400000 else "red"
+        folium.CircleMarker(
+            [r.geometry.centroid.y, r.geometry.centroid.x], radius=6, color=color, fill=True,
+            popup=folium.Popup(
+                f"<b>{r.address}</b><br>"
+                f"Price: ${r.price:,.0f}<br>"
+                f"$/Unit: ${r.price_per_unit:,.0f}<br>"
+                f"Max: {r.max_units:.0f}<br>"
+                f"Zoning: {r.Zoning}",
+                max_width=300
+            )
+        ).add_to(m)
+    st_folium(m, width=1200, height=600)
+
+# --- Download ---
+dl = filtered[["address", "price", "price_per_unit", "max_units", "Zoning"]].copy()
+dl.columns = ["Address", "Price", "$/Unit", "Max Units", "Zoning"]
+dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
+dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
+st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
+
+st.success("**LIVE!** YOUR original full sqft_map, 450 MB, full LA City")
