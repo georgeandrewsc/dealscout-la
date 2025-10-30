@@ -14,7 +14,7 @@ import os
 # --- Page Config ---
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
-st.markdown("**Upload MLS CSV → Get LA City deals with 1234 S Cochran Ave, R3/RD1.5 zoning, $/unit & map.**")
+st.markdown("**Upload MLS CSV → Search for LA City Deals**")
 
 # --- Helper: Find Column ---
 def find_col(df, candidates):
@@ -59,15 +59,16 @@ street_dir_suffix = mls.get("StreetDirSuffix", pd.Series("")).astype(str).str.st
 street_suffix = mls.get("StreetSuffix", pd.Series("")).astype(str).str.strip()
 
 for col in [street_number, street_dir_prefix, street_name, street_dir_suffix, street_suffix]:
-    col.replace({"nan": "", "NaN": ""}, inplace=True)
+    col.replace({"nan": "", "NaN": "", "None": ""}, inplace=True)
+    col[col == ""] = ""  # Ensure empties are handled
 
 address_parts = []
 for num, dir_p, name, dir_s, suffix in zip(street_number, street_dir_prefix, street_name, street_dir_suffix, street_suffix):
     parts = []
     if num: parts.append(num)
     if dir_p: parts.append(dir_p)
-    elif dir_s: parts.append(dir_s)
     if name: parts.append(name)
+    if dir_s: parts.append(dir_s)
     if suffix: parts.append(suffix)
     address_parts.append(" ".join(parts) if parts else "Unknown Address")
 
@@ -83,7 +84,7 @@ gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # --- Load Zoning (Cached, Once) ---
 if not st.session_state.get("zoning_processed", False):
-    @st.cache_data
+    @st.cache_resource
     def load_zoning():
         path = "Zoning.geojson"
         if not os.path.exists(path):
@@ -139,7 +140,7 @@ sqft_per_unit_map = {
     'MR1':400,'M1':400,'MR2':200,'M2':200,
 }
 
-# --- Extract base code ---
+# --- Extract base code for calculations, but use full Zoning for output ---
 la_city_only["zone_code"] = la_city_only["Zoning"].astype(str).str.split('-').str[0].str.upper()
 la_city_only["sqft_per_unit"] = la_city_only["zone_code"].map(sqft_per_unit_map).fillna(5000)
 la_city_only["max_units"] = (la_city_only["lot_sqft"] / la_city_only["sqft_per_unit"]).clip(1, 20)
@@ -158,12 +159,12 @@ max_price_per_unit = st.sidebar.slider(
     "Max $/unit", 0, 2000000, 500000, 50000, key="price_slider"
 )
 zone_filter = st.sidebar.multiselect(
-    "Zoning Code", ["All"] + sorted(la_city_only["zone_code"].unique()), ["All"], key="zone_filter"
+    "Zoning Code", ["All"] + sorted(la_city_only["Zoning"].unique()), ["All"], key="zone_filter"
 )
 
 filtered = la_city_only[la_city_only["price_per_unit"] <= max_price_per_unit].copy()
 if "All" not in zone_filter:
-    filtered = filtered[filtered["zone_code"].isin(zone_filter)]
+    filtered = filtered[filtered["Zoning"].isin(zone_filter)]
 
 st.write(f"**{len(filtered):,}** deals after filters (City of LA only)")
 
@@ -177,7 +178,7 @@ if not filtered.empty:
             f"Price: ${r['price']:,.0f}<br>"
             f"$/Unit: ${r['price_per_unit']:,.0f}<br>"
             f"Max Units: {r['max_units']:.0f}<br>"
-            f"Zoning: {r['zone_code']}",
+            f"Zoning: {r['Zoning']}",
             max_width=300
         )
         folium.CircleMarker(
@@ -193,7 +194,7 @@ else:
     st.warning("No deals match filters. Try increasing Max $/unit.")
 
 # --- DOWNLOAD CSV ---
-download_df = filtered[["address", "price", "price_per_unit", "max_units", "zone_code"]].copy()
+download_df = filtered[["address", "price", "price_per_unit", "max_units", "Zoning"]].copy()
 download_df.columns = ["Address", "Price", "$/Unit", "Max Units", "Zoning"]
 download_df["Price"] = download_df["Price"].apply(lambda x: f"${x:,.0f}")
 download_df["$/Unit"] = download_df["$/Unit"].apply(lambda x: f"${x:,.0f}")
@@ -204,4 +205,4 @@ st.download_button(
     mime="text/csv"
 )
 
-st.success("**Done!** All data is **City of LA only** with **R3, RD1.5, etc.** and **1234 S Cochran Ave** format.")
+st.success("**Done!** All data is **City of LA only** with proper zoning and address format.")
