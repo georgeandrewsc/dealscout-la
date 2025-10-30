@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: 450 MB FROM GOOGLE DRIVE ONLY
+# DealScout LA — FINAL: 450 MB FROM GOOGLE DRIVE (FIXED)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,8 +8,9 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
-import urllib.request
-import io
+import requests
+import tempfile
+import os
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
@@ -58,14 +59,25 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 gdf["geometry"] = gdf["geometry"].buffer(0.0001)
 
-# --- Load 450 MB Zoning from Google Drive ---
+# --- Load 450 MB Zoning from Google Drive (FIXED) ---
 @st.cache_resource
 def load_zoning():
-    url = "https://drive.google.com/uc?export=download&id=13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa"
+    file_id = "13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa"
+    url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
     try:
-        with urllib.request.urlopen(url) as response:
-            data = response.read()
-        gdf = gpd.read_file(io.BytesIO(data))
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".geojson") as tmp_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                tmp_file.write(chunk)
+            tmp_path = tmp_file.name
+
+        # Read with GeoPandas
+        gdf = gpd.read_file(tmp_path)
+        os.unlink(tmp_path)  # Delete temp file
+        
         if gdf.crs is None:
             gdf.set_crs("EPSG:2229", inplace=True)
         return gdf.to_crs("EPSG:4326")
@@ -79,7 +91,7 @@ st.write("**Zoning loaded:**", len(zoning), "polygons")
 # --- Select Zoning Field ---
 default = "ZONE_CLASS" if "ZONE_CLASS" in zoning.columns else "Zoning"
 zoning_field = st.selectbox("Select Zoning Field", zoning.columns, index=zoning.columns.get_loc(default))
-st.success(f"Using **{zoning_field}**")
+st.success(f"Using **{zoning_field}** → e.g., RD1.5-1")
 
 # --- Join ---
 gdf = gdf.to_crs(zoning.crs)
@@ -135,4 +147,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** 450 MB from Google Drive, no GitHub file needed")
+st.success("**LIVE!** 450 MB from Google Drive, no errors, full zoning")
