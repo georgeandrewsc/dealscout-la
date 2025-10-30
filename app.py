@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL 100% WORKING (INTERSECTS + BUFFER)
+# DealScout LA — FINAL 100% WORKING (NO KEYERROR)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -50,11 +50,11 @@ suf = clean(mls.iloc[:, suffix_idx])
 mls["address"] = (num + " " + name + " " + suf).str.replace(r"\s+", " ", regex=True).str.strip()
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
-# --- Geometry + Buffer (10 meters) ---
+# --- Geometry + Buffer ---
 mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None, axis=1)
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
-gdf["geometry"] = gdf["geometry"].buffer(0.0001)  # ~10 meters
+gdf["geometry"] = gdf["geometry"].buffer(0.0001)  # ~10m buffer
 
 # --- Load Zoning ---
 @st.cache_resource
@@ -71,16 +71,19 @@ def load_zoning():
 zoning = load_zoning()
 st.write("**Zoning CRS:**", zoning.crs)
 
-# --- Select "Zoning" field ---
+# --- Find Zoning Field ---
 zoning_field = "Zoning"
 if zoning_field not in zoning.columns:
-    st.error("Zoning column not found!")
+    st.error("Zoning column not found in GeoJSON!")
     st.stop()
 
-# --- Spatial Join (INTERSECTS + BUFFER) ---
+# --- Spatial Join (INTERSECTS + RENAME TO AVOID CONFLICT) ---
 gdf = gdf.to_crs(zoning.crs)
-joined = gpd.sjoin(gdf, zoning[[zoning_field, "geometry"]], how="left", predicate="intersects")
-joined["Zoning"] = joined[zoning_field].fillna("Outside LA")
+zoning_subset = zoning[[zoning_field, "geometry"]].copy()
+zoning_subset = zoning_subset.rename(columns={zoning_field: "ZONING_CODE"})  # Rename to avoid conflict
+
+joined = gpd.sjoin(gdf, zoning_subset, how="left", predicate="intersects")
+joined["Zoning"] = joined["ZONING_CODE"].fillna("Outside LA")
 
 # --- LA City Filter ---
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
@@ -140,4 +143,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Real zoning, full address, City of LA only")
+st.success("**LIVE!** Real zoning, no KeyError, City of LA only")
