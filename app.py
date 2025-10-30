@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FIXED: Buffer + Intersects for Edge Cases
+# DealScout LA — FINAL: 450 MB FROM GOOGLE DRIVE ONLY
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,6 +8,8 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
+import urllib.request
+import io
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
@@ -22,7 +24,7 @@ if not uploaded:
 mls = pd.read_csv(uploaded)
 st.write(f"**{len(mls):,}** raw listings loaded")
 
-# --- Column Indices (Your CSV) ---
+# --- Column Indices ---
 price_idx = 132
 lat_idx = 311
 lon_idx = 254
@@ -50,71 +52,63 @@ suf = clean(mls.iloc[:, suffix_idx])
 mls["address"] = (num + " " + name + " " + suf).str.replace(r"\s+", " ", regex=True).str.strip()
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
-# --- Geometry + Buffer (10m to catch edges) ---
+# --- Geometry + Buffer ---
 mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None, axis=1)
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
-gdf["geometry"] = gdf["geometry"].buffer(0.0001)  # ~10m buffer
+gdf["geometry"] = gdf["geometry"].buffer(0.0001)
 
-# --- Load Zoning (24.9 MB version) ---
+# --- Load 450 MB Zoning from Google Drive ---
 @st.cache_resource
 def load_zoning():
+    url = "https://drive.google.com/uc?export=download&id=13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa"
     try:
-        z = gpd.read_file("Zoning.geojson")
-        if z.crs is None:
-            z.set_crs("EPSG:2229", inplace=True)
-        return z.to_crs("EPSG:4326")
+        with urllib.request.urlopen(url) as response:
+            data = response.read()
+        gdf = gpd.read_file(io.BytesIO(data))
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:2229", inplace=True)
+        return gdf.to_crs("EPSG:4326")
     except Exception as e:
-        st.error(f"Cannot load Zoning.geojson: {e}")
+        st.error(f"Cannot load zoning: {e}")
         st.stop()
 
 zoning = load_zoning()
 st.write("**Zoning loaded:**", len(zoning), "polygons")
 
 # --- Select Zoning Field ---
-zoning_field = "Zoning"  # Your file's column with CM-1, RD1.5-1
-if zoning_field not in zoning.columns:
-    st.error("Zoning column not found!")
-    st.stop()
+default = "ZONE_CLASS" if "ZONE_CLASS" in zoning.columns else "Zoning"
+zoning_field = st.selectbox("Select Zoning Field", zoning.columns, index=zoning.columns.get_loc(default))
+st.success(f"Using **{zoning_field}**")
 
-# --- Spatial Join (INTERSECTS + BUFFER) ---
+# --- Join ---
 gdf = gdf.to_crs(zoning.crs)
-zoning_subset = zoning[[zoning_field, "geometry"]].rename(columns={zoning_field: "ZONING_CODE"})
-joined = gpd.sjoin(gdf, zoning_subset, how="left", predicate="intersects")
-joined["Zoning"] = joined["ZONING_CODE"].fillna("Outside LA")
+joined = gpd.sjoin(gdf, zoning[[zoning_field, "geometry"]], how="left", predicate="intersects")
+joined["Zoning"] = joined[zoning_field].fillna("Outside LA")
 
 # --- LA City Only ---
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
+if la_city.empty:
+    st.error("No LA City listings.")
+    st.stop()
 
-# --- Debug Toggle ---
-show_all = st.checkbox("Show All Listings (Debug)", value=True)
-if show_all:
-    display = joined
-    st.write(f"**{len(display):,}** total listings")
-else:
-    if la_city.empty:
-        st.warning("No LA City listings. Try 'Show All'.")
-        display = joined
-    else:
-        display = la_city
-        st.write(f"**{len(display):,}** LA City deals")
+st.write(f"**{len(la_city):,}** LA City deals")
 
 # --- Max Units ---
 sqft_map = {
-    'CM':800, 'C1':800, 'C2':400, 'C4':400,
     'RD1.5':1500, 'RD2':2000, 'R3':800, 'R4':400, 'R5':200,
-    'R1':5000, 'R2':2500
+    'R1':5000, 'R2':2500, 'C2':400, 'C1':800, 'CM':800
 }
-display["base"] = display["Zoning"].str.split("-").str[0].str.upper()
-display["sqft_per"] = display["base"].map(sqft_map).fillna(5000)
-display["max_units"] = (display["lot_sqft"] / display["sqft_per"]).clip(1, 20)
-r1 = display["base"].str.startswith("R1")
-display.loc[r1, "max_units"] = display.loc[r1, "lot_sqft"].apply(lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2)
-display["price_per_unit"] = (display["price"] / display["max_units"]).round(0)
+la_city["base"] = la_city["Zoning"].str.split("-").str[0].str.upper()
+la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
+la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(1, 20)
+r1 = la_city["base"].str.startswith("R1")
+la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2)
+la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0)
 
 # --- Filter ---
 max_ppu = st.sidebar.slider("Max $/unit", 0, 1000000, 300000, 25000)
-filtered = display[display["price_per_unit"] <= max_ppu].copy()
+filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # --- Map ---
 if not filtered.empty:
@@ -141,4 +135,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** 24.9 MB file, buffer + intersects, real LA City deals")
+st.success("**LIVE!** 450 MB from Google Drive, no GitHub file needed")
