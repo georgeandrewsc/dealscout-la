@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: NO KEYERROR, AUTO-DETECT
+# DealScout LA — FINAL: sjoin FIX
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -59,7 +59,7 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 gdf["geometry"] = gdf["geometry"].buffer(0.0001)
 
-# --- Load 450 MB Zoning from Google Drive ---
+# --- Load 450 MB Zoning ---
 @st.cache_resource(show_spinner="Downloading 450 MB zoning file...")
 def load_zoning():
     url = "https://drive.google.com/file/d/13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa/view?usp=sharing"
@@ -94,8 +94,9 @@ st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., RD1.5-1")
 gdf = gdf.to_crs(zoning.crs)
 joined = gpd.sjoin(gdf, zoning[[zoning_field, "geometry"]], how="left", predicate="intersects")
 
-# --- FIX: Use zoning_field directly, then create "Zoning" ---
-joined["Zoning"] = joined[zoning_field].fillna("Outside LA")
+# --- FIX: sjoin adds "_left" suffix ---
+zoning_col_in_joined = zoning_field + "_left" if zoning_field + "_left" in joined.columns else zoning_field
+joined["Zoning"] = joined[zoning_col_in_joined].fillna("Outside LA")
 
 # --- LA City Only ---
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
@@ -123,27 +124,4 @@ filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # --- Map ---
 if not filtered.empty:
-    m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
-    for _, r in filtered.iterrows():
-        color = "lime" if r.price_per_unit < 200000 else "orange" if r.price_per_unit < 400000 else "red"
-        folium.CircleMarker(
-            [r.geometry.centroid.y, r.geometry.centroid.x], radius=6, color=color, fill=True,
-            popup=folium.Popup(
-                f"<b>{r.address}</b><br>"
-                f"Price: ${r.price:,.0f}<br>"
-                f"$/Unit: ${r.price_per_unit:,.0f}<br>"
-                f"Max: {r.max_units:.0f}<br>"
-                f"Zoning: {r.Zoning}",
-                max_width=300
-            )
-        ).add_to(m)
-    st_folium(m, width=1200, height=600)
-
-# --- Download ---
-dl = filtered[["address", "price", "price_per_unit", "max_units", "Zoning"]].copy()
-dl.columns = ["Address", "Price", "$/Unit", "Max Units", "Zoning"]
-dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
-dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
-st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
-
-st.success("**LIVE!** No KeyError, auto-detected zoning, 450 MB, full LA City")
+    m = folium.Map([34.05, -118.24], zoom_start=11
