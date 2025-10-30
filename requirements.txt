@@ -1,7 +1,6 @@
 streamlit
-streamlit-folium
+pandas
 geopandas
 folium
-pandas
-shapely
-numpy
+streamlit-folium
+gdown
