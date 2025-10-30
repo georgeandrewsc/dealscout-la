@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: 450 MB FROM GOOGLE DRIVE (FIXED)
+# DealScout LA — FINAL: 450 MB FROM DRIVE (gdown + DRIVER)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,7 +8,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
-import requests
+import gdown
 import tempfile
 import os
 
@@ -59,30 +59,25 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 gdf["geometry"] = gdf["geometry"].buffer(0.0001)
 
-# --- Load 450 MB Zoning from Google Drive (FIXED) ---
-@st.cache_resource
+# --- Load 450 MB Zoning from Google Drive (gdown) ---
+@st.cache_resource(show_spinner="Downloading 450 MB zoning file...")
 def load_zoning():
     file_id = "13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa"
-    url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
+    url = f"https://drive.google.com/uc?id={file_id}"
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".geojson") as tmp_file:
-            for chunk in response.iter_content(chunk_size=8192):
-                tmp_file.write(chunk)
+            gdown.download(url, tmp_file.name, quiet=False)
             tmp_path = tmp_file.name
 
-        # Read with GeoPandas
-        gdf = gpd.read_file(tmp_path)
-        os.unlink(tmp_path)  # Delete temp file
-        
+        # FORCE DRIVER
+        gdf = gpd.read_file(tmp_path, driver="GeoJSON")
+        os.unlink(tmp_path)
+
         if gdf.crs is None:
             gdf.set_crs("EPSG:2229", inplace=True)
         return gdf.to_crs("EPSG:4326")
     except Exception as e:
-        st.error(f"Cannot load zoning: {e}")
+        st.error(f"Download failed: {e}")
         st.stop()
 
 zoning = load_zoning()
@@ -147,4 +142,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** 450 MB from Google Drive, no errors, full zoning")
+st.success("**LIVE!** 450 MB from Drive, gdown, DRIVER=GeoJSON, no errors")
