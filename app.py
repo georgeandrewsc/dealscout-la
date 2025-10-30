@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: 450 MB FROM DRIVE (gdown + DRIVER)
+# DealScout LA — FINAL: AUTO-DETECT ZONING COLUMN
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -59,17 +59,15 @@ mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 gdf["geometry"] = gdf["geometry"].buffer(0.0001)
 
-# --- Load 450 MB Zoning from Google Drive (gdown) ---
+# --- Load 450 MB Zoning from Google Drive ---
 @st.cache_resource(show_spinner="Downloading 450 MB zoning file...")
 def load_zoning():
-    file_id = "13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa"
-    url = f"https://drive.google.com/uc?id={file_id}"
+    url = "https://drive.google.com/file/d/13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa/view?usp=sharing"
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".geojson") as tmp_file:
-            gdown.download(url, tmp_file.name, quiet=False)
+            gdown.download(url, tmp_file.name, quiet=False, fuzzy=True)
             tmp_path = tmp_file.name
 
-        # FORCE DRIVER
         gdf = gpd.read_file(tmp_path, driver="GeoJSON")
         os.unlink(tmp_path)
 
@@ -83,10 +81,14 @@ def load_zoning():
 zoning = load_zoning()
 st.write("**Zoning loaded:**", len(zoning), "polygons")
 
-# --- Select Zoning Field ---
-default = "ZONE_CLASS" if "ZONE_CLASS" in zoning.columns else "Zoning"
-zoning_field = st.selectbox("Select Zoning Field", zoning.columns, index=zoning.columns.get_loc(default))
-st.success(f"Using **{zoning_field}** → e.g., RD1.5-1")
+# --- AUTO-DETECT ZONING COLUMN ---
+zone_cols = [col for col in zoning.columns if any(k in col.lower() for k in ["zone", "zoning", "class"])]
+if not zone_cols:
+    st.error("No zoning column found! Columns: " + ", ".join(zoning.columns))
+    st.stop()
+
+zoning_field = zone_cols[0]  # Use first match
+st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., RD1.5-1")
 
 # --- Join ---
 gdf = gdf.to_crs(zoning.crs)
@@ -96,7 +98,7 @@ joined["Zoning"] = joined[zoning_field].fillna("Outside LA")
 # --- LA City Only ---
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
 if la_city.empty:
-    st.error("No LA City listings.")
+    st.error("No LA City listings found.")
     st.stop()
 
 st.write(f"**{len(la_city):,}** LA City deals")
@@ -142,4 +144,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** 450 MB from Drive, gdown, DRIVER=GeoJSON, no errors")
+st.success("**LIVE!** Auto-detected zoning, 450 MB, no errors")
