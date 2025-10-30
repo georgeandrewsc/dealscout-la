@@ -17,10 +17,9 @@ st.title("DealScout LA")
 st.markdown("**Upload MLS CSV → Search for LA City Deals**")
 
 # --------------------------------------------------------------
-# Helper – find column (case-insensitive + fallback to letter)
+# Helper – find column (case-insensitive + letter fallback)
 # --------------------------------------------------------------
 def find_col(df, candidates):
-    """Return first column that matches any candidate (ignore case)."""
     cols_lower = [c.lower() for c in df.columns]
     for cand in candidates:
         if cand.lower() in cols_lower:
@@ -39,26 +38,27 @@ mls = pd.read_csv(uploaded)
 st.write(f"**{len(mls):,}** raw listings loaded")
 
 # --------------------------------------------------------------
-# Find required columns (friendly names + letter fall-backs)
+# Required columns (friendly name OR Excel letter)
 # --------------------------------------------------------------
 price_col = find_col(mls, ["CurrentPrice", "price", "ListPrice", "EC"])          # EC = price
 lot_col   = find_col(mls, ["LotSizeSquareFeet", "lot_sqft", "LotSizeAcres"])
 lat_col   = find_col(mls, ["Latitude", "lat", "KZ"])                            # KZ = lat
 lon_col   = find_col(mls, ["Longitude", "lon", "IU"])                           # IU = lon
 
-# Address pieces
-num_col   = find_col(mls, ["StreetNumber", "TC"])                               # TC = number
-prefix_col= find_col(mls, ["StreetDirPrefix"])
-name_col  = find_col(mls, ["StreetName", "TA"])                                 # TA = name
-suffix_dir_col = find_col(mls, ["StreetDirSuffix"])
-suffix_col= find_col(mls, ["StreetSuffix", "TD"])                               # TD = suffix
+# ----- ADDRESS PIECES (TC, TA, TD) -----
+num_col   = find_col(mls, ["StreetNumber", "TC"])          # TC = number
+name_col  = find_col(mls, ["StreetName", "TA"])            # TA = name
+suffix_col= find_col(mls, ["StreetSuffix", "TD"])          # TD = suffix
 
-if not all([price_col, lot_col, lat_col, lon_col]):
-    st.error("CSV must contain: price (EC), lot size, Latitude (KZ), Longitude (IU).")
+if not all([price_col, lot_col, lat_col, lon_col, num_col, name_col, suffix_col]):
+    st.error(
+        "CSV must contain: price (EC), lot size, Latitude (KZ), Longitude (IU), "
+        "StreetNumber (TC), StreetName (TA), StreetSuffix (TD)."
+    )
     st.stop()
 
 # --------------------------------------------------------------
-# Clean core numeric fields
+# Clean numeric fields
 # --------------------------------------------------------------
 mls["price"] = pd.to_numeric(mls[price_col], errors="coerce")
 mls["lot_sqft"] = pd.to_numeric(mls[lot_col], errors="coerce")
@@ -69,22 +69,20 @@ mls["lat"] = pd.to_numeric(mls[lat_col], errors="coerce")
 mls["lon"] = pd.to_numeric(mls[lon_col], errors="coerce")
 
 # --------------------------------------------------------------
-# Build **full** address (e.g. "2622 S Cochran Ave")
+# Build **full** address – e.g. "2622 S Cochran Ave"
 # --------------------------------------------------------------
-def safe_str(series):
+def clean(series):
     return series.astype(str).str.strip().replace({"nan":"", "None":"", "<NA>":""}, regex=False)
 
-num   = safe_str(mls.get(num_col, pd.Series("")))
-pref  = safe_str(mls.get(prefix_col, pd.Series("")))
-name  = safe_str(mls.get(name_col, pd.Series("")))
-suf_d = safe_str(mls.get(suffix_dir_col, pd.Series("")))
-suf   = safe_str(mls.get(suffix_col, pd.Series("")))
+num   = clean(mls[num_col])
+name  = clean(mls[name_col])
+suf   = clean(mls[suffix_col])
 
-address_parts = [
-    " ".join(filter(None, [n, p, nm, sd, s]))
-    for n, p, nm, sd, s in zip(num, pref, name, suf_d, suf)
+address = [
+    " ".join(filter(None, [n, nm, s]))
+    for n, nm, s in zip(num, name, suf)
 ]
-mls["address"] = [a if a else "Unknown Address" for a in address_parts]
+mls["address"] = [a if a else "Unknown Address" for a in address]
 
 # --------------------------------------------------------------
 # Geometry
@@ -116,7 +114,7 @@ if not st.session_state.get("zoning_processed", False):
     default = zone_cols[0] if zone_cols else zoning.columns[0]
 
     zoning_field = st.selectbox(
-        "Select zoning column (e.g. ZONE_CLASS, ZONECODE)",
+        "Select zoning column (e.g. ZONE_CLASS, ZONECODE, ZONE)",
         options=zoning.columns,
         index=zoning.columns.get_loc(default),
         key="zoning_sel"
@@ -145,7 +143,7 @@ if la_city.empty:
 st.write(f"**{len(la_city):,}** listings inside LA City (out of {len(joined):,})")
 
 # --------------------------------------------------------------
-# Max-units look-up (base zone only, e.g. RD1.5 → RD1.5)
+# Max-units look-up (base zone only)
 # --------------------------------------------------------------
 sqft_per_unit_map = {
     'A1':108900,'A2':43560,'RE40':40000,'RE20':20000,'RE15':15000,'RE11':11000,'RE9':9000,
@@ -157,7 +155,6 @@ sqft_per_unit_map = {
     'MR1':400,'M1':400,'MR2':200,'M2':200,
 }
 
-# Base code for calculations
 la_city["base_zone"] = la_city["Zoning"].astype(str).str.split('-').str[0].str.upper()
 la_city["sqft_per_unit"] = la_city["base_zone"].map(sqft_per_unit_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per_unit"]).clip(lower=1, upper=20)
@@ -225,4 +222,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.success("**Done!** Full address, exact zoning (e.g. RD1.5-1), City of LA only.")
+st.success("**Done!** Full address (TC+TA+TD), exact zoning (e.g. RD1.5-1), City of LA only.")
