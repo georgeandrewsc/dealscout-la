@@ -127,19 +127,35 @@ zoning = load_zoning()
 st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. Filter to LA City + Join Zoning
+# 7. DEBUG: Show Zoning Boundary + MLS Points
 # ------------------------------------------------------------------
-gdf_la = gpd.sjoin(gdf.to_crs("EPSG:4326"), zoning.to_crs("EPSG:4326"), how="inner", predicate="intersects")
+st.subheader("DEBUG: Zoning Polygons + MLS Points")
 
-if gdf_la.empty:
-    st.error("**No points inside LA City zoning.**\n→ Check MLS CSV lat/lon or zoning file.")
-    st.stop()
+debug_map = folium.Map(location=[34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
 
-# Drop duplicate index from sjoin
-gdf_la = gdf_la.reset_index(drop=True)
-gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()]  # remove duplicate geometry cols
+# Add zoning polygons (light blue outline)
+folium.GeoJson(
+    zoning,
+    style_function=lambda x: {
+        'fillColor': 'transparent',
+        'color': 'blue',
+        'weight': 1,
+        'opacity': 0.5
+    },
+    tooltip=folium.GeoJsonTooltip(fields=['ZONE_CLASS'], aliases=['Zone:'])
+).add_to(debug_map)
 
-st.success(f"**{len(gdf_la):,}** points inside LA City with zoning")
+# Add MLS points (red)
+for _, r in gdf.iterrows():
+    folium.CircleMarker(
+        location=[r.geometry.y, r.geometry.x],
+        radius=4,
+        color="red",
+        fill=True,
+        popup=f"{r.address}"
+    ).add_to(debug_map)
+
+st_folium(debug_map, width=1000, height=500, key="debug_zoning_points")
 
 # ------------------------------------------------------------------
 # 8. Create la_city with Zoning
