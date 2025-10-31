@@ -120,12 +120,21 @@ st.success(f"**{len(gdf_la):,}** points inside LA City")
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
+    # Your uploaded file — fast, reliable, accurate
     url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
     
+    # Use cached version if exists
     if os.path.exists(cache_file):
-        return gpd.read_file(cache_file)[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
-    
+        try:
+            gdf = gpd.read_file(cache_file)
+            if gdf.crs is None:
+                gdf.set_crs("EPSG:4326", inplace=True)
+            return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
+        except:
+            pass  # force re-download if corrupt
+
+    # Download from your GitHub Release
     try:
         with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
@@ -137,12 +146,11 @@ def load_zoning():
             gdf.set_crs("EPSG:4326", inplace=True)
         return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
     except Exception as e:
-        st.error(f"Zoning download failed: {e}")
+        st.error(f"Failed to load zoning file: {e}")
         st.stop()
 
 zoning = load_zoning()
-st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
-
+st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons (from GitHub Release)")
 # ------------------------------------------------------------------
 # 9. Spatial join with buffer
 # ------------------------------------------------------------------
