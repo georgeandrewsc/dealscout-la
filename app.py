@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: YOUR ORIGINAL sqft_map (FULL)
+# DealScout LA — FIXED: Use Official LA City Zoning GeoJSON
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,7 +8,6 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
-import gdown
 import tempfile
 import os
 
@@ -57,23 +56,17 @@ mls["address"] = mls["address"].replace("", "Unknown Address")
 mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None, axis=1)
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
-gdf["geometry"] = gdf["geometry"].buffer(0.0001)
+gdf["geometry"] = gdf["geometry"].buffer(0.0005)  # Increased buffer slightly to 50m for better intersection if points are off
 
-# --- Load 450 MB Zoning ---
-@st.cache_resource(show_spinner="Downloading 450 MB zoning file...")
+# --- Load Zoning from Official Source ---
+@st.cache_resource(show_spinner="Loading official LA City zoning GeoJSON...")
 def load_zoning():
-    url = "https://drive.google.com/file/d/13SuoVz2-uHSXR85T2uUHY36Z-agB28Qa/view?usp=sharing"
+    url = "https://data.lacity.org/resource/jjxn-vhan.geojson"
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".geojson") as tmp_file:
-            gdown.download(url, tmp_file.name, quiet=False, fuzzy=True)
-            tmp_path = tmp_file.name
-
-        gdf = gpd.read_file(tmp_path, driver="GeoJSON")
-        os.unlink(tmp_path)
-
+        gdf = gpd.read_file(url)
         if gdf.crs is None:
-            gdf.set_crs("EPSG:2229", inplace=True)
-        return gdf.to_crs("EPSG:4326")
+            gdf = gdf.set_crs("EPSG:4326")
+        return gdf
     except Exception as e:
         st.error(f"Download failed: {e}")
         st.stop()
@@ -81,14 +74,14 @@ def load_zoning():
 zoning = load_zoning()
 st.write("**Zoning loaded:**", len(zoning), "polygons")
 
-# --- AUTO-DETECT ZONING COLUMN ---
+# --- AUTO-DETECT ZONING COLUMN (should find 'zone_cmplt') ---
 zone_cols = [col for col in zoning.columns if any(k in col.lower() for k in ["zone", "zoning", "class"])]
 if not zone_cols:
     st.error("No zoning column found! Columns: " + ", ".join(zoning.columns))
     st.stop()
 
-zoning_field = zone_cols[0]
-st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., RD1.5-1")
+zoning_field = zone_cols[0]  # Should be 'zone_cmplt'
+st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., R1-1")
 
 # --- Join ---
 gdf = gdf.to_crs(zoning.crs)
@@ -116,7 +109,8 @@ sqft_map = {
     'RMP':20000, 'MR1':400, 'M1':400, 'MR2':200, 'M2':200,
     'A1':108900, 'A2':43560
 }
-la_city["base"] = la_city["Zoning"].str.split("-").str[0].str.upper()
+# Extract base zoning, ignoring qualifiers like (Q), [Q], etc.
+la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F]', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(1, 20)
 r1 = la_city["base"].str.startswith("R1")
@@ -152,4 +146,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** YOUR original full sqft_map, 450 MB, full LA City")
+st.success("**LIVE!** Using official LA City Zoning GeoJSON from data.lacity.org. Zoning lookup via spatial join on lat/lon points. Increased buffer for better matches. Cleaned base zoning extraction to handle qualifiers.")
