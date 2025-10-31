@@ -122,19 +122,60 @@ if gdf_la.empty:
 st.success(f"**{len(gdf_la):,}** points inside LA City (using zoning polygons)")
 
 # ------------------------------------------------------------------
-# 8. Spatial join with buffer
+# 8. REAL LA CITY ZONING — FROM GITHUB RELEASE (440 MB) — FIXED
 # ------------------------------------------------------------------
-gdf_buf = gdf_la.copy()
-gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0.001)  # ~100m
+@st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
+def load_zoning():
+    url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
+    cache_file = "zoning_cache.geojson"
+    
+    if os.path.exists(cache_file):
+        try:
+            gdf = gpd.read_file(cache_file)
+            st.write("**Using cached zoning file**")
+            return _fix_zoning_gdf(gdf)
+        except Exception as e:
+            st.warning(f"Cache corrupt ({e}), redownloading...")
 
-joined = gpd.sjoin(gdf_buf, zoning, how="left", predicate="intersects")
-joined["Zoning"] = joined["ZONE_CLASS"].fillna("Outside LA")
+    try:
+        with requests.get(url, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            with open(cache_file, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+        gdf = gpd.read_file(cache_file)
+        return _fix_zoning_gdf(gdf)
+    except Exception as e:
+        st.error(f"Failed to load zoning file: {e}")
+        st.stop()
 
-la_city = joined[joined["Zoning"] != "Outside LA"].copy()
-if la_city.empty:
-    st.error("No zoning matches. Try increasing buffer.")
-    st.stop()
-st.write(f"**{len(la_city):,}** LA City deals with **REAL zoning**")
+def _fix_zoning_gdf(gdf):
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4326", inplace=True)
+    gdf = gdf.to_crs("EPSG:4326")
+    
+    # DEBUG: Show column names
+    cols = list(gdf.columns)
+    st.write(f"**Zoning file columns:** {cols}")
+    
+    # Auto-detect zoning column
+    zone_col = None
+    for col in cols:
+        lower = col.lower()
+        if any(k in lower for k in ['zone', 'zoning', 'class']):
+            zone_col = col
+            break
+    
+    if zone_col is None:
+        st.error("No zoning column found! Expected: ZONE_CLASS, ZONING, ZONE, etc.")
+        st.stop()
+    
+    st.write(f"**Using zoning column:** `{zone_col}`")
+    gdf["ZONE_CLASS"] = gdf[zone_col]  # standardize
+    return gdf[["ZONE_CLASS", "geometry"]]
+
+zoning = load_zoning()
+st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
 # 9. sqft_map
