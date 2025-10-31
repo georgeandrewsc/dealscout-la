@@ -111,7 +111,6 @@ def load_la_boundary():
 
 la_boundary = load_la_boundary()
 st.write(f"**Boundary loaded:** {len(la_boundary):,} polygons")
-
 # ------------------------------------------------------------------
 # 7. Filter points INSIDE LA City
 # ------------------------------------------------------------------
@@ -154,7 +153,6 @@ def load_zoning():
 
 zoning = load_zoning()
 st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
-
 # ------------------------------------------------------------------
 # 9. Spatial join with buffer
 # ------------------------------------------------------------------
