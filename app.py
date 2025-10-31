@@ -79,18 +79,23 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY BOUNDARY – PUBLIC GeoHub GeoJSON (works 2025-10-30)
+# 6. LA CITY BOUNDARY – PUBLIC ArcGIS REST (no auth, works 2025-10-30)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
 def load_la_boundary():
-    # Direct GeoJSON export from the City Boundary layer
-    url = "https://geohub.lacity.org/datasets/city-boundary.geojson"
+    # Direct query → GeoJSON (no login required)
+    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/City_Boundary/FeatureServer/0/query"
+    params = {
+        "where": "1=1",
+        "outFields": "*",
+        "returnGeometry": "true",
+        "f": "geojson"
+    }
     try:
-        with requests.get(url, timeout=60) as r:
+        with requests.get(url, params=params, timeout=60) as r:
             r.raise_for_status()
-            # Stream to a temp file (GeoJSON can be ~30 MB)
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in r.iter_content(8192):
                 tmp.write(chunk)
             tmp.close()
             gdf = gpd.read_file(tmp.name)
@@ -100,6 +105,7 @@ def load_la_boundary():
         return gdf.to_crs("EPSG:4326")
     except Exception as e:
         st.warning(f"Boundary failed ({e}). Using fallback box.")
+        from shapely.geometry import box
         bbox = box(-118.668, 33.703, -118.155, 34.337)
         return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
 
@@ -118,23 +124,28 @@ if gdf_la.empty:
 st.success(f"**{len(gdf_la):,}** points inside LA City")
 
 # ------------------------------------------------------------------
-# 8. LA CITY ZONING – PUBLIC GeoHub GeoJSON (works 2025-10-30)
+# 8. LA CITY ZONING – PUBLIC ArcGIS REST (no auth)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning…", ttl=24*3600)
 def load_zoning():
-    # Direct GeoJSON export from the Zoning layer (only LA City zones)
-    url = "https://geohub.lacity.org/datasets/zoning.geojson"
+    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/Zoning/FeatureServer/0/query"
+    params = {
+        "where": "1=1",                     # get everything (we’ll filter later)
+        "outFields": "ZONE_CLASS",
+        "returnGeometry": "true",
+        "f": "geojson"
+    }
     try:
-        with requests.get(url, timeout=120) as r:
+        with requests.get(url, params=params, timeout=120) as r:
             r.raise_for_status()
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in r.iter_content(8192):
                 tmp.write(chunk)
             tmp.close()
             gdf = gpd.read_file(tmp.name)
             os.unlink(tmp.name)
         if gdf.crs is None:
-            gdf.set_crs("EPSG:2229", inplace=True)          # native CRS
+            gdf.set_crs("EPSG:2229", inplace=True)   # native CRS
         return gdf.to_crs("EPSG:4326")
     except Exception as e:
         st.warning(f"Zoning failed ({e}). Using dummy R1 zone.")
