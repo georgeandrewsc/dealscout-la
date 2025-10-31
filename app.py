@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FIXED: Use Official LA City Zoning GeoJSON
+# DealScout LA — FIXED: Correct CRS + Debug + LA City Only
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,6 +8,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
+import requests
 import tempfile
 import os
 
@@ -48,58 +49,76 @@ def clean(series):
 num = clean(mls.iloc[:, num_idx])
 name = clean(mls.iloc[:, name_idx])
 suf = clean(mls.iloc[:, suffix_idx])
-
 mls["address"] = (num + " " + name + " " + suf).str.replace(r"\s+", " ", regex=True).str.strip()
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
-# --- Geometry + Buffer ---
+# --- Geometry ---
 mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None, axis=1)
 mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
-gdf["geometry"] = gdf["geometry"].buffer(0.0005)  # Increased buffer slightly to 50m for better intersection if points are off
 
-# --- Load Zoning from Official Source ---
-@st.cache_resource(show_spinner="Loading official LA City zoning GeoJSON...")
+# --- DEBUG: Show map of all points ---
+st.subheader("Debug: All MLS Points")
+m_debug = folium.Map([34.05, -118.24], zoom_start=10)
+for _, r in gdf.iterrows():
+    folium.CircleMarker(
+        [r.geometry.y, r.geometry.x], radius=3, color="blue", fill=True
+    ).add_to(m_debug)
+st_folium(m_debug, width=800, height=400, key="debug")
+
+# --- Load LA City Zoning (EPSG:2229) ---
+@st.cache_resource(show_spinner="Loading LA City Zoning (EPSG:2229)...")
 def load_zoning():
     url = "https://data.lacity.org/resource/jjxn-vhan.geojson"
-    try:
-        gdf = gpd.read_file(url)
-        if gdf.crs is None:
-            gdf = gdf.set_crs("EPSG:4326")
-        return gdf
-    except Exception as e:
-        st.error(f"Download failed: {e}")
-        st.stop()
+    gdf = gpd.read_file(url)
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:2229", inplace=True)
+    return gdf.to_crs("EPSG:4326")  # Convert to WGS84 for mapping
 
 zoning = load_zoning()
-st.write("**Zoning loaded:**", len(zoning), "polygons")
+st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
 
-# --- AUTO-DETECT ZONING COLUMN (should find 'zone_cmplt') ---
-zone_cols = [col for col in zoning.columns if any(k in col.lower() for k in ["zone", "zoning", "class"])]
-if not zone_cols:
-    st.error("No zoning column found! Columns: " + ", ".join(zoning.columns))
+# --- Load LA City Boundary (to filter) ---
+@st.cache_resource(show_spinner="Loading LA City Boundary...")
+def load_la_boundary():
+    url = "https://data.lacity.org/resource/6fgp-e5uh.geojson"  # Official City Boundary
+    gdf = gpd.read_file(url)
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4326", inplace=True)
+    return gdf.to_crs("EPSG:4326")
+
+la_boundary = load_la_boundary()
+
+# --- Filter MLS points INSIDE LA City ---
+gdf_la = gdf.copy()
+gdf_la = gdf_la.to_crs(la_boundary.crs)
+gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
+if gdf_la.empty:
+    st.error("No MLS points are inside **LA City boundary**. All points are in unincorporated areas (Calabasas, Malibu, etc.).")
     st.stop()
+else:
+    st.success(f"**{len(gdf_la):,}** MLS points inside LA City")
 
-zoning_field = zone_cols[0]  # Should be 'zone_cmplt'
-st.success(f"Auto-detected zoning field: **{zoning_field}** → e.g., R1-1")
+# --- Reproject for join with zoning ---
+gdf_la = gdf_la.to_crs("EPSG:2229")  # Match zoning CRS
+zoning_local = zoning.to_crs("EPSG:2229")
 
-# --- Join ---
-gdf = gdf.to_crs(zoning.crs)
-joined = gpd.sjoin(gdf, zoning[[zoning_field, "geometry"]], how="left", predicate="intersects")
+# Increase buffer to ~100m to catch near-misses
+gdf_la["geometry"] = gdf_la["geometry"].buffer(300)  # ~300 ft
 
-# --- FIX: sjoin adds "_left" suffix ---
-zoning_col_in_joined = zoning_field + "_left" if zoning_field + "_left" in joined.columns else zoning_field
-joined["Zoning"] = joined[zoning_col_in_joined].fillna("Outside LA")
+# --- Spatial Join ---
+joined = gpd.sjoin(gdf_la, zoning_local[["zone_cmplt", "geometry"]], how="left", predicate="intersects")
+joined["Zoning"] = joined["zone_cmplt"].fillna("Outside LA")
 
-# --- LA City Only ---
+# --- Final LA City with Zoning ---
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
 if la_city.empty:
-    st.error("No LA City listings found.")
+    st.error("No points matched zoning. Try increasing buffer or check coordinates.")
     st.stop()
 
-st.write(f"**{len(la_city):,}** LA City deals")
+st.write(f"**{len(la_city):,}** LA City deals with zoning")
 
-# --- YOUR ORIGINAL FULL sqft_map ---
+# --- sqft_map ---
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
     'RD1.5':1500, 'RD2':2000, 'R3':800, 'RAS3':800, 'R4':400, 'RAS4':400, 'R5':200,
@@ -109,7 +128,6 @@ sqft_map = {
     'RMP':20000, 'MR1':400, 'M1':400, 'MR2':200, 'M2':200,
     'A1':108900, 'A2':43560
 }
-# Extract base zoning, ignoring qualifiers like (Q), [Q], etc.
 la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F]', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(1, 20)
@@ -123,8 +141,9 @@ filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # --- Map ---
 if not filtered.empty:
+    filtered_wgs = filtered.to_crs("EPSG:4326")
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
-    for _, r in filtered.iterrows():
+    for _, r in filtered_wgs.iterrows():
         color = "lime" if r.price_per_unit < 200000 else "orange" if r.price_per_unit < 400000 else "red"
         folium.CircleMarker(
             [r.geometry.centroid.y, r.geometry.centroid.x], radius=6, color=color, fill=True,
@@ -146,4 +165,4 @@ dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Using official LA City Zoning GeoJSON from data.lacity.org. Zoning lookup via spatial join on lat/lon points. Increased buffer for better matches. Cleaned base zoning extraction to handle qualifiers.")
+st.success("**FIXED:** Using official LA City boundary + zoning. CRS aligned. 300ft buffer. Debug map.")
