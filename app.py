@@ -78,11 +78,12 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY BOUNDARY — PUBLIC (data.lacity.org)
+# 6. LA CITY BOUNDARY — FIXED (WORKING URL)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
 def load_la_boundary():
-    url = "https://data.lacity.org/api/geospatial/6fgp-e5uh?method=export&format=GeoJSON"
+    # WORKING Socrata API URL (tested Oct 31, 2025)
+    url = "https://data.lacity.org/api/geospatial/6fgp-e5uh/rows.geojson?accessType=DOWNLOAD"
     try:
         with requests.get(url, timeout=60) as r:
             r.raise_for_status()
@@ -95,6 +96,7 @@ def load_la_boundary():
         return gdf.to_crs("EPSG:4326")
     except Exception as e:
         st.warning(f"Boundary failed ({e}). Using fallback.")
+        # Fallback: rough LA City box
         bbox = box(-118.668, 33.703, -118.155, 34.337)
         return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
 
