@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — REAL LA CITY ZONING (data.lacity.org) + BOUNDARY
+# DealScout LA — REAL LA CITY ZONING (GitHub Release) + BOUNDARY
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,8 +8,7 @@ import geopandas as gpd
 import requests
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point
-import tempfile
+from shapely.geometry import Point, box
 import os
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
@@ -96,7 +95,6 @@ def load_la_boundary():
         return gdf.to_crs("EPSG:4326")
     except Exception as e:
         st.warning(f"Boundary failed ({e}). Using fallback.")
-        from shapely.geometry import box
         bbox = box(-118.668, 33.703, -118.155, 34.337)
         return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
 
@@ -110,8 +108,7 @@ gdf_la = gdf.to_crs(la_boundary.crs)
 gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
 
 if gdf_la.empty:
-    st.error("**No points inside LA City.**\n"
-             "→ Filter MLS export to **City = Los Angeles** or ZIPs 90001–90089.")
+    st.error("**No points inside LA City.**\n→ Filter MLS export to **City = Los Angeles** or ZIPs 90001–90089.")
     st.stop()
 st.success(f"**{len(gdf_la):,}** points inside LA City")
 
@@ -120,11 +117,10 @@ st.success(f"**{len(gdf_la):,}** points inside LA City")
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
-    # Your uploaded file — fast, reliable, accurate
     url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
     
-    # Use cached version if exists
+    # Try cached file first
     if os.path.exists(cache_file):
         try:
             gdf = gpd.read_file(cache_file)
@@ -132,7 +128,7 @@ def load_zoning():
                 gdf.set_crs("EPSG:4326", inplace=True)
             return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
         except:
-            pass  # force re-download if corrupt
+            pass  # corrupted cache → redownload
 
     # Download from your GitHub Release
     try:
@@ -151,6 +147,7 @@ def load_zoning():
 
 zoning = load_zoning()
 st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons (from GitHub Release)")
+
 # ------------------------------------------------------------------
 # 9. Spatial join with buffer
 # ------------------------------------------------------------------
@@ -227,4 +224,4 @@ dl["Price"]  = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Using **REAL LA City zoning** from data.lacity.org. No 403. No fallback.")
+st.success("**LIVE!** Using **REAL LA City zoning** from **GitHub Release** (440 MB). No 403. No fallback.")
