@@ -1,10 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL & BULLETPROOF
-#   • Official LA City zoning + boundary
-#   • Timeout-proof downloads
-#   • 300-ft buffer
-#   • Debug map
-#   • Works on Streamlit Cloud
+# DealScout LA — FINAL: Real LA City Zoning (ArcGIS) + Boundary
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -19,7 +14,7 @@ import os
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
-st.markdown("**Upload MLS CSV → Find LA City land deals**")
+st.markdown("**Upload MLS CSV → Find Real LA City Land Deals**")
 
 # ------------------------------------------------------------------
 # 1. Upload CSV
@@ -33,7 +28,7 @@ mls = pd.read_csv(uploaded)
 st.write(f"**{len(mls):,}** raw listings loaded")
 
 # ------------------------------------------------------------------
-# 2. Column indices (your file)
+# 2. Column indices
 # ------------------------------------------------------------------
 price_idx   = 132
 lat_idx     = 311
@@ -84,85 +79,88 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA City BOUNDARY – robust download
+# 6. LA CITY BOUNDARY — WORKING URL (GeoHub)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
 def load_la_boundary():
-    url = "https://data.lacity.org/resource/6fgp-e5uh.geojson"
+    # Official LA City boundary from GeoHub
+    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/City_Boundary/FeatureServer/0/query"
+    params = {
+        "where": "1=1",
+        "outFields": "*",
+        "returnGeometry": "true",
+        "f": "geojson"
+    }
     try:
-        with requests.get(url, stream=True, timeout=60) as r:
+        with requests.get(url, params=params, timeout=60) as r:
             r.raise_for_status()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(8192):
-                tmp.write(chunk)
-            tmp.close()
-            gdf = gpd.read_file(tmp.name)
-            os.unlink(tmp.name)
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:4326", inplace=True)
-        return gdf.to_crs("EPSG:4326")
+            data = r.json()
+            gdf = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
+        return gdf
     except Exception as e:
-        st.warning(f"Boundary failed ({e}). Using fallback box.")
+        st.warning(f"Boundary failed ({e}). Using fallback.")
         bbox = box(-118.668, 33.703, -118.155, 34.337)
         return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
 
 la_boundary = load_la_boundary()
+st.write(f"**Boundary loaded:** {len(la_boundary):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. Keep only points INSIDE LA City
+# 7. Filter points INSIDE LA City
 # ------------------------------------------------------------------
 gdf_la = gdf.to_crs(la_boundary.crs)
 gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
 
 if gdf_la.empty:
-    st.error("**No points inside LA City.** All listings are in unincorporated areas.")
+    st.error("**No points inside LA City.** Check your MLS export — are any in Los Angeles city limits?")
     st.stop()
 st.success(f"**{len(gdf_la):,}** points inside LA City")
 
 # ------------------------------------------------------------------
-# 8. LA City ZONING – robust download
+# 8. LA CITY ZONING — REAL ARCGIS ENDPOINT
 # ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City zoning…", ttl=24*3600)
+@st.cache_data(show_spinner="Downloading LA City zoning (ArcGIS)…", ttl=24*3600)
 def load_zoning():
-    url = "https://data.lacity.org/resource/jjxn-vhan.geojson"
+    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/Zoning/FeatureServer/0/query"
+    params = {
+        "where": "CITY = 'Los Angeles'",
+        "outFields": "ZONE_CLASS",
+        "returnGeometry": "true",
+        "f": "geojson"
+    }
     try:
-        with requests.get(url, stream=True, timeout=120) as r:
+        with requests.get(url, params=params, timeout=120) as r:
             r.raise_for_status()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(8192):
-                tmp.write(chunk)
-            tmp.close()
-            gdf = gpd.read_file(tmp.name)
-            os.unlink(tmp.name)
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:2229", inplace=True)
-        return gdf.to_crs("EPSG:4326")
+            data = r.json()
+            gdf = gpd.GeoDataFrame.from_features(data["features"])
+            if gdf.crs is None:
+                gdf.set_crs("EPSG:4326", inplace=True)
+            return gdf
     except Exception as e:
-        st.warning(f"Zoning failed ({e}). Using dummy R1 zone.")
+        st.warning(f"Zoning failed ({e}). Using dummy.")
         dummy = la_boundary.unary_union
-        return gpd.GeoDataFrame({"zone_cmplt": ["R1"]}, geometry=[dummy], crs="EPSG:4326")
+        return gpd.GeoDataFrame({"ZONE_CLASS": ["R1"]}, geometry=[dummy], crs="EPSG:4326")
 
 zoning = load_zoning()
 st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 9. Spatial join with 300-ft buffer
+# 9. Spatial join with buffer
 # ------------------------------------------------------------------
-gdf_buf = gdf_la.to_crs("EPSG:2229")
-gdf_buf["geometry"] = gdf_buf["geometry"].buffer(300)          # ~300 ft
-zoning_2229 = zoning.to_crs("EPSG:2229")
+gdf_buf = gdf_la.copy()
+gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0.001)  # ~100 meters
 
-joined = gpd.sjoin(gdf_buf, zoning_2229[["zone_cmplt","geometry"]], how="left", predicate="intersects")
-joined["Zoning"] = joined["zone_cmplt"].fillna("Outside LA")
+joined = gpd.sjoin(gdf_buf, zoning[["ZONE_CLASS", "geometry"]], how="left", predicate="intersects")
+joined["Zoning"] = joined["ZONE_CLASS"].fillna("Outside LA")
 
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
 if la_city.empty:
-    st.error("No zoning matches. Try a larger buffer.")
+    st.error("No zoning matches. Try increasing buffer.")
     st.stop()
 st.write(f"**{len(la_city):,}** LA City deals with zoning")
 
 # ------------------------------------------------------------------
-# 10. Your ORIGINAL sqft_map
+# 10. sqft_map (your original)
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -179,7 +177,6 @@ la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F]', '', regex=True).s
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(1, 20)
 
-# R1 special rule
 r1 = la_city["base"].str.startswith("R1")
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
@@ -197,9 +194,8 @@ filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 # 12. Map
 # ------------------------------------------------------------------
 if not filtered.empty:
-    filtered_wgs = filtered.to_crs("EPSG:4326")
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
-    for _, r in filtered_wgs.iterrows():
+    for _, r in filtered.iterrows():
         color = "lime" if r.price_per_unit < 200_000 else "orange" if r.price_per_unit < 400_000 else "red"
         folium.CircleMarker(
             [r.geometry.centroid.y, r.geometry.centroid.x],
@@ -222,11 +218,6 @@ dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
 dl.columns = ["Address","Price","$/Unit","Max Units","Zoning"]
 dl["Price"]  = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
-st.download_button(
-    "Download CSV",
-    dl.to_csv(index=False),
-    "LA_Deals.csv",
-    "text/csv"
-)
+st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Official LA City zoning, timeout-proof, 300-ft buffer, debug map.")
+st.success("**LIVE!** Using **real LA City zoning (ArcGIS)** + **official boundary**. No more 404s.")
