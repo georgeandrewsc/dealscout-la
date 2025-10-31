@@ -8,7 +8,7 @@ import geopandas as gpd
 import requests
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point, box
+from shapely.geometry import Point
 import os
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
@@ -78,51 +78,13 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY BOUNDARY — FIXED (WORKING URL)
-# ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
-def load_la_boundary():
-    # WORKING Socrata API URL (tested Oct 31, 2025)
-    url = "https://data.lacity.org/api/geospatial/6fgp-e5uh/rows.geojson?accessType=DOWNLOAD"
-    try:
-        with requests.get(url, timeout=60) as r:
-            r.raise_for_status()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(8192):
-                tmp.write(chunk)
-            tmp.close()
-            gdf = gpd.read_file(tmp.name)
-            os.unlink(tmp.name)
-        return gdf.to_crs("EPSG:4326")
-    except Exception as e:
-        st.warning(f"Boundary failed ({e}). Using fallback.")
-        # Fallback: rough LA City box
-        bbox = box(-118.668, 33.703, -118.155, 34.337)
-        return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
-
-la_boundary = load_la_boundary()
-st.write(f"**Boundary loaded:** {len(la_boundary):,} polygons")
-
-# ------------------------------------------------------------------
-# 7. Filter to LA City
-# ------------------------------------------------------------------
-gdf_la = gdf.to_crs(la_boundary.crs)
-gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
-
-if gdf_la.empty:
-    st.error("**No points inside LA City.**\n→ Filter MLS export to **City = Los Angeles** or ZIPs 90001–90089.")
-    st.stop()
-st.success(f"**{len(gdf_la):,}** points inside LA City")
-
-# ------------------------------------------------------------------
-# 8. REAL LA CITY ZONING — FROM GITHUB RELEASE (440 MB)
+# 6. LA CITY ZONING AS BOUNDARY — FROM GITHUB RELEASE (440 MB)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
     url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
     
-    # Try cached file first
     if os.path.exists(cache_file):
         try:
             gdf = gpd.read_file(cache_file)
@@ -130,9 +92,8 @@ def load_zoning():
                 gdf.set_crs("EPSG:4326", inplace=True)
             return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
         except:
-            pass  # corrupted cache → redownload
+            pass  # force re-download if corrupt
 
-    # Download from your GitHub Release
     try:
         with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
@@ -148,10 +109,20 @@ def load_zoning():
         st.stop()
 
 zoning = load_zoning()
-st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons (from GitHub Release)")
+st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons (used as boundary)")
 
 # ------------------------------------------------------------------
-# 9. Spatial join with buffer
+# 7. Filter to LA City using Zoning
+# ------------------------------------------------------------------
+gdf_la = gpd.sjoin(gdf.to_crs("EPSG:4326"), zoning.to_crs("EPSG:4326"), how="inner", predicate="intersects")
+
+if gdf_la.empty:
+    st.error("**No points inside LA City zoning.**\n→ Check MLS CSV lat/lon or ensure zoning file is valid.")
+    st.stop()
+st.success(f"**{len(gdf_la):,}** points inside LA City (using zoning polygons)")
+
+# ------------------------------------------------------------------
+# 8. Spatial join with buffer
 # ------------------------------------------------------------------
 gdf_buf = gdf_la.copy()
 gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0.001)  # ~100m
@@ -166,7 +137,7 @@ if la_city.empty:
 st.write(f"**{len(la_city):,}** LA City deals with **REAL zoning**")
 
 # ------------------------------------------------------------------
-# 10. sqft_map
+# 9. sqft_map
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -191,13 +162,13 @@ la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
 la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0)
 
 # ------------------------------------------------------------------
-# 11. Filter
+# 10. Filter
 # ------------------------------------------------------------------
 max_ppu = st.sidebar.slider("Max $/unit", 0, 1_000_000, 300_000, 25_000)
 filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # ------------------------------------------------------------------
-# 12. Map
+# 11. Map
 # ------------------------------------------------------------------
 if not filtered.empty:
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
@@ -218,7 +189,7 @@ if not filtered.empty:
     st_folium(m, width=1200, height=600)
 
 # ------------------------------------------------------------------
-# 13. Download
+# 12. Download
 # ------------------------------------------------------------------
 dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
 dl.columns = ["Address","Price","$/Unit","Max Units","Zoning"]
@@ -226,4 +197,4 @@ dl["Price"]  = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Using **REAL LA City zoning** from **GitHub Release** (440 MB). No 403. No fallback.")
+st.success("**LIVE!** Using **REAL LA City zoning** from GitHub Release (440 MB). No boundary API.")
