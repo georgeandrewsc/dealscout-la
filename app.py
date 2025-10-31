@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — REAL LA CITY ZONING (GitHub Release) + BOUNDARY
+# DealScout LA — REAL LA CITY ZONING + BOUNDARY
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -27,7 +27,7 @@ mls = pd.read_csv(uploaded)
 st.write(f"**{len(mls):,}** raw listings loaded")
 
 # ------------------------------------------------------------------
-# 2. Column indices
+# 2. Column indices (adjust if your CSV changes)
 # ------------------------------------------------------------------
 price_idx   = 132
 lat_idx     = 311
@@ -59,7 +59,7 @@ mls["address"] = (num + " " + name + " " + suf).str.replace(r"\s+"," ",regex=Tru
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
 # ------------------------------------------------------------------
-# 4. Points
+# 4. Points → GeoDataFrame
 # ------------------------------------------------------------------
 mls["geometry"] = mls.apply(
     lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None,
@@ -69,22 +69,34 @@ mls = mls.dropna(subset=["geometry","price","lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. DEBUG MAP
+# 5. LA CITY BOUNDARY (lightweight) – filter MLS first
 # ------------------------------------------------------------------
-st.subheader("Debug: All MLS Points")
-m_debug = folium.Map([34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
-for _, r in gdf.iterrows():
-    folium.CircleMarker([r.geometry.y, r.geometry.x], radius=3, color="blue", fill=True).add_to(m_debug)
-st_folium(m_debug, width=800, height=400, key="debug_raw")
+@st.cache_data
+def load_la_city_boundary():
+    url = "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/los-angeles.geojson"
+    gdf = gpd.read_file(url)
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4326", inplace=True)
+    return gdf.to_crs("EPSG:4326")
+
+la_boundary = load_la_city_boundary()
+st.write(f"**LA City boundary loaded:** {len(la_boundary)} polygon(s)")
+
+gdf_city = gpd.sjoin(gdf, la_boundary, how="inner", predicate="within")
+if gdf_city.empty:
+    st.error("**No MLS points inside the official LA City boundary.**\n"
+             "Your CSV likely contains all of LA County, not just the City.")
+    st.stop()
+st.success(f"**{len(gdf_city):,}** MLS points are inside **LA City**")
 
 # ------------------------------------------------------------------
-# 6. LA CITY ZONING — FROM GITHUB RELEASE (440 MB) — FIXED & FINAL
+# 6. REAL LA CITY ZONING (440 MB) – cached
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
     url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
-    
+
     if os.path.exists(cache_file):
         try:
             gdf = gpd.read_file(cache_file)
@@ -97,10 +109,10 @@ def load_zoning():
         with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
             total = int(r.headers.get('content-length', 0))
-            st.write(f"Downloading {total/1e6:.1f} MB...")
-            with open(cache_file, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
+            with st.spinner(f"Downloading {total/1e6:.1f} MB…"):
+                with open(cache_file, "wb") as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
         gdf = gpd.read_file(cache_file)
         return _fix_zoning_gdf(gdf)
     except Exception as e:
@@ -109,15 +121,14 @@ def load_zoning():
 
 def _fix_zoning_gdf(gdf):
     if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
+        gdf.set_crs("EPSG:4326", inplace=True)
     gdf = gdf.to_crs("EPSG:4326")
-    
+
     # Auto-detect zoning column
-    cols = [c for c in gdf.columns if c.lower() in ['zone_class', 'zoning', 'zone', 'class', 'zonecode']]
+    cols = [c for c in gdf.columns if c.lower() in ['zone_class','zoning','zone','class','zonecode']]
     if not cols:
         st.error(f"No zoning column found! Columns: {list(gdf.columns)}")
         st.stop()
-    
     zone_col = cols[0]
     st.write(f"**Using zoning column:** `{zone_col}`")
     gdf["ZONE_CLASS"] = gdf[zone_col].astype(str)
@@ -127,45 +138,55 @@ zoning = load_zoning()
 st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. DEBUG: Show Zoning Boundary + MLS Points
+# 7. Join city-filtered points with zoning
 # ------------------------------------------------------------------
-st.subheader("DEBUG: Zoning Polygons + MLS Points")
+gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
+gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
+
+if gdf_la.empty:
+    st.error("No points intersect zoning polygons even after city filter. Check lat/lon.")
+    st.stop()
+
+st.success(f"**{len(gdf_la):,}** points have a zoning code")
+
+# Create la_city for the rest of the script
+la_city = gdf_la.copy()
+la_city["Zoning"] = la_city["ZONE_CLASS"]
+
+# ------------------------------------------------------------------
+# 8. DEBUG MAP – Zoning outlines (blue) + MLS points (red)
+# ------------------------------------------------------------------
+st.subheader("DEBUG: Zoning Polygons (blue) + MLS Points (red)")
 
 debug_map = folium.Map(location=[34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
 
-# Add zoning polygons (light blue outline)
+# Zoning outlines
 folium.GeoJson(
     zoning,
     style_function=lambda x: {
-        'fillColor': 'transparent',
-        'color': 'blue',
-        'weight': 1,
-        'opacity': 0.5
+        "fillColor": "transparent",
+        "color": "deepskyblue",
+        "weight": 1.2,
+        "opacity": 0.6,
     },
-    tooltip=folium.GeoJsonTooltip(fields=['ZONE_CLASS'], aliases=['Zone:'])
+    tooltip=folium.GeoJsonTooltip(fields=["ZONE_CLASS"], aliases=["Zone:"])
 ).add_to(debug_map)
 
-# Add MLS points (red)
-for _, r in gdf.iterrows():
+# MLS points (red)
+for _, r in gdf_city.iterrows():
     folium.CircleMarker(
         location=[r.geometry.y, r.geometry.x],
         radius=4,
         color="red",
         fill=True,
-        popup=f"{r.address}"
+        fillOpacity=0.8,
+        popup=folium.Popup(f"<b>{r.address}</b>", max_width=200)
     ).add_to(debug_map)
 
-st_folium(debug_map, width=1000, height=500, key="debug_zoning_points")
+st_folium(debug_map, width=1000, height=550, key="debug_zoning_mls")
 
 # ------------------------------------------------------------------
-# 8. Create la_city with Zoning
-# ------------------------------------------------------------------
-la_city = gdf_la.copy()
-la_city["Zoning"] = la_city["ZONE_CLASS"]  # Now this exists!
-st.write("**Sample zoning values:**", la_city["Zoning"].unique()[:20])
-
-# ------------------------------------------------------------------
-# 9. sqft_map + Calculations
+# 9. sqft_map + unit calculations
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -178,13 +199,12 @@ sqft_map = {
     'A1':108900, 'A2':43560
 }
 
-# Clean base zone
 la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F].*', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(lower=1).apply(lambda x: min(x, 20))
 
 # Special R1 rule
-r1 = la_city["base"] == b"R1"
+r1 = la_city["base"] == "R1"
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
 )
@@ -192,13 +212,13 @@ la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
 la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0).astype(int)
 
 # ------------------------------------------------------------------
-# 10. Filter
+# 10. Filter by max $/unit
 # ------------------------------------------------------------------
 max_ppu = st.sidebar.slider("Max $/unit", 0, 1_000_000, 300_000, 25_000)
 filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # ------------------------------------------------------------------
-# 11. Map
+# 11. Final map of deals
 # ------------------------------------------------------------------
 if not filtered.empty:
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
@@ -216,20 +236,25 @@ if not filtered.empty:
                 max_width=300
             )
         ).add_to(m)
-    st_folium(m, width=1200, height=600, key="final_map")
+    st_folium(m, width=1200, height=600, key="final_deals")
 else:
-    st.warning("No deals under selected $/unit threshold.")
+    st.warning("No deals under the selected $/unit threshold.")
 
 # ------------------------------------------------------------------
-# 12. Download
+# 12. Download CSV
 # ------------------------------------------------------------------
 if not filtered.empty:
     dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
-    dl.columns = ["Address","Price","$/Unit","Max Units","Zoning"]
+    dl.columns = ["Address","Price","$ per Unit","Max Units","Zoning"]
     dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
-    dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
-    st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
+    dl["$ per Unit"] = dl["$ per Unit"].apply(lambda x: f"${x:,.0f}")
+    st.download_button(
+        "Download CSV",
+        dl.to_csv(index=False),
+        "LA_Deals.csv",
+        "text/csv"
+    )
 else:
     st.info("No data to download at current filter.")
 
-st.success("**LIVE!** Using **REAL LA City zoning** from GitHub (440 MB).")
+st.success("**LIVE!** Using **REAL LA City zoning** (cached) + official city boundary.")
