@@ -116,27 +116,29 @@ if gdf_la.empty:
 st.success(f"**{len(gdf_la):,}** points inside LA City")
 
 # ------------------------------------------------------------------
-# 8. REAL LA CITY ZONING — PUBLIC (data.lacity.org)
+# 8. REAL LA CITY ZONING — FROM GITHUB RELEASE (440 MB)
 # ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading REAL LA City zoning…", ttl=24*3600)
+@st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
-    url = "https://data.lacity.org/api/geospatial/7q2f-5s9b?method=export&format=GeoJSON"
+    url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
+    cache_file = "zoning_cache.geojson"
+    
+    if os.path.exists(cache_file):
+        return gpd.read_file(cache_file)[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
+    
     try:
-        with requests.get(url, timeout=120) as r:
+        with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(8192):
-                tmp.write(chunk)
-            tmp.close()
-            gdf = gpd.read_file(tmp.name)
-            os.unlink(tmp.name)
+            with open(cache_file, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+        gdf = gpd.read_file(cache_file)
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
         return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
     except Exception as e:
-        st.warning(f"Zoning failed ({e}). Using dummy R1.")
-        dummy = la_boundary.unary_union
-        return gpd.GeoDataFrame({"ZONE_CLASS": ["R1"]}, geometry=[dummy], crs="EPSG:4326")
+        st.error(f"Zoning download failed: {e}")
+        st.stop()
 
 zoning = load_zoning()
 st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
