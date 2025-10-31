@@ -79,26 +79,27 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY BOUNDARY — WORKING URL (GeoHub)
+# 6. LA CITY BOUNDARY – PUBLIC GeoHub GeoJSON (works 2025-10-30)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
 def load_la_boundary():
-    # Official LA City boundary from GeoHub
-    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/City_Boundary/FeatureServer/0/query"
-    params = {
-        "where": "1=1",
-        "outFields": "*",
-        "returnGeometry": "true",
-        "f": "geojson"
-    }
+    # Direct GeoJSON export from the City Boundary layer
+    url = "https://geohub.lacity.org/datasets/city-boundary.geojson"
     try:
-        with requests.get(url, params=params, timeout=60) as r:
+        with requests.get(url, timeout=60) as r:
             r.raise_for_status()
-            data = r.json()
-            gdf = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
-        return gdf
+            # Stream to a temp file (GeoJSON can be ~30 MB)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
+            for chunk in r.iter_content(chunk_size=8192):
+                tmp.write(chunk)
+            tmp.close()
+            gdf = gpd.read_file(tmp.name)
+            os.unlink(tmp.name)
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:4326", inplace=True)
+        return gdf.to_crs("EPSG:4326")
     except Exception as e:
-        st.warning(f"Boundary failed ({e}). Using fallback.")
+        st.warning(f"Boundary failed ({e}). Using fallback box.")
         bbox = box(-118.668, 33.703, -118.155, 34.337)
         return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
 
@@ -117,27 +118,26 @@ if gdf_la.empty:
 st.success(f"**{len(gdf_la):,}** points inside LA City")
 
 # ------------------------------------------------------------------
-# 8. LA CITY ZONING — REAL ARCGIS ENDPOINT
+# 8. LA CITY ZONING – PUBLIC GeoHub GeoJSON (works 2025-10-30)
 # ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City zoning (ArcGIS)…", ttl=24*3600)
+@st.cache_data(show_spinner="Downloading LA City zoning…", ttl=24*3600)
 def load_zoning():
-    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/Zoning/FeatureServer/0/query"
-    params = {
-        "where": "CITY = 'Los Angeles'",
-        "outFields": "ZONE_CLASS",
-        "returnGeometry": "true",
-        "f": "geojson"
-    }
+    # Direct GeoJSON export from the Zoning layer (only LA City zones)
+    url = "https://geohub.lacity.org/datasets/zoning.geojson"
     try:
-        with requests.get(url, params=params, timeout=120) as r:
+        with requests.get(url, timeout=120) as r:
             r.raise_for_status()
-            data = r.json()
-            gdf = gpd.GeoDataFrame.from_features(data["features"])
-            if gdf.crs is None:
-                gdf.set_crs("EPSG:4326", inplace=True)
-            return gdf
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
+            for chunk in r.iter_content(chunk_size=8192):
+                tmp.write(chunk)
+            tmp.close()
+            gdf = gpd.read_file(tmp.name)
+            os.unlink(tmp.name)
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:2229", inplace=True)          # native CRS
+        return gdf.to_crs("EPSG:4326")
     except Exception as e:
-        st.warning(f"Zoning failed ({e}). Using dummy.")
+        st.warning(f"Zoning failed ({e}). Using dummy R1 zone.")
         dummy = la_boundary.unary_union
         return gpd.GeoDataFrame({"ZONE_CLASS": ["R1"]}, geometry=[dummy], crs="EPSG:4326")
 
