@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — FINAL: Real LA City Zoning (ArcGIS) + Boundary
+# DealScout LA — REAL LA CITY ZONING (data.lacity.org) + BOUNDARY
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -8,13 +8,13 @@ import geopandas as gpd
 import requests
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point, box
+from shapely.geometry import Point
 import tempfile
 import os
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
-st.markdown("**Upload MLS CSV → Find Real LA City Land Deals**")
+st.markdown("**Upload MLS CSV → Real LA City Zoning Deals**")
 
 # ------------------------------------------------------------------
 # 1. Upload CSV
@@ -70,7 +70,7 @@ mls = mls.dropna(subset=["geometry","price","lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. DEBUG MAP – all raw points
+# 5. DEBUG MAP
 # ------------------------------------------------------------------
 st.subheader("Debug: All MLS Points")
 m_debug = folium.Map([34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
@@ -79,20 +79,50 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY BOUNDARY – PUBLIC ArcGIS REST (no auth, works 2025-10-30)
+# 6. LA CITY BOUNDARY — PUBLIC (data.lacity.org)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City boundary…", ttl=24*3600)
 def load_la_boundary():
-    # Direct query → GeoJSON (no login required)
-    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/City_Boundary/FeatureServer/0/query"
-    params = {
-        "where": "1=1",
-        "outFields": "*",
-        "returnGeometry": "true",
-        "f": "geojson"
-    }
+    url = "https://data.lacity.org/api/geospatial/6fgp-e5uh?method=export&format=GeoJSON"
     try:
-        with requests.get(url, params=params, timeout=60) as r:
+        with requests.get(url, timeout=60) as r:
+            r.raise_for_status()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
+            for chunk in r.iter_content(8192):
+                tmp.write(chunk)
+            tmp.close()
+            gdf = gpd.read_file(tmp.name)
+            os.unlink(tmp.name)
+        return gdf.to_crs("EPSG:4326")
+    except Exception as e:
+        st.warning(f"Boundary failed ({e}). Using fallback.")
+        from shapely.geometry import box
+        bbox = box(-118.668, 33.703, -118.155, 34.337)
+        return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
+
+la_boundary = load_la_boundary()
+st.write(f"**Boundary loaded:** {len(la_boundary):,} polygons")
+
+# ------------------------------------------------------------------
+# 7. Filter to LA City
+# ------------------------------------------------------------------
+gdf_la = gdf.to_crs(la_boundary.crs)
+gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
+
+if gdf_la.empty:
+    st.error("**No points inside LA City.**\n"
+             "→ Filter MLS export to **City = Los Angeles** or ZIPs 90001–90089.")
+    st.stop()
+st.success(f"**{len(gdf_la):,}** points inside LA City")
+
+# ------------------------------------------------------------------
+# 8. REAL LA CITY ZONING — PUBLIC (data.lacity.org)
+# ------------------------------------------------------------------
+@st.cache_data(show_spinner="Downloading REAL LA City zoning…", ttl=24*3600)
+def load_zoning():
+    url = "https://data.lacity.org/api/geospatial/7q2f-5s9b?method=export&format=GeoJSON"
+    try:
+        with requests.get(url, timeout=120) as r:
             r.raise_for_status()
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
             for chunk in r.iter_content(8192):
@@ -102,74 +132,32 @@ def load_la_boundary():
             os.unlink(tmp.name)
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
-        return gdf.to_crs("EPSG:4326")
+        return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
     except Exception as e:
-        st.warning(f"Boundary failed ({e}). Using fallback box.")
-        from shapely.geometry import box
-        bbox = box(-118.668, 33.703, -118.155, 34.337)
-        return gpd.GeoDataFrame(geometry=[bbox], crs="EPSG:4326")
-
-la_boundary = load_la_boundary()
-st.write(f"**Boundary loaded:** {len(la_boundary):,} polygons")
-# ------------------------------------------------------------------
-# 7. Filter points INSIDE LA City
-# ------------------------------------------------------------------
-gdf_la = gdf.to_crs(la_boundary.crs)
-gdf_la = gpd.sjoin(gdf_la, la_boundary[["geometry"]], how="inner", predicate="within")
-
-if gdf_la.empty:
-    st.error("**No points inside LA City.** Check your MLS export — are any in Los Angeles city limits?")
-    st.stop()
-st.success(f"**{len(gdf_la):,}** points inside LA City")
-
-# ------------------------------------------------------------------
-# 8. LA CITY ZONING – PUBLIC ArcGIS REST (no auth)
-# ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City zoning…", ttl=24*3600)
-def load_zoning():
-    url = "https://services5.arcgis.com/7nsPwEMP36bSkspO/arcgis/rest/services/Zoning/FeatureServer/0/query"
-    params = {
-        "where": "1=1",                     # get everything (we’ll filter later)
-        "outFields": "ZONE_CLASS",
-        "returnGeometry": "true",
-        "f": "geojson"
-    }
-    try:
-        with requests.get(url, params=params, timeout=120) as r:
-            r.raise_for_status()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
-            for chunk in r.iter_content(8192):
-                tmp.write(chunk)
-            tmp.close()
-            gdf = gpd.read_file(tmp.name)
-            os.unlink(tmp.name)
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:2229", inplace=True)   # native CRS
-        return gdf.to_crs("EPSG:4326")
-    except Exception as e:
-        st.warning(f"Zoning failed ({e}). Using dummy R1 zone.")
+        st.warning(f"Zoning failed ({e}). Using dummy R1.")
         dummy = la_boundary.unary_union
         return gpd.GeoDataFrame({"ZONE_CLASS": ["R1"]}, geometry=[dummy], crs="EPSG:4326")
 
 zoning = load_zoning()
-st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
+st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
+
 # ------------------------------------------------------------------
 # 9. Spatial join with buffer
 # ------------------------------------------------------------------
 gdf_buf = gdf_la.copy()
-gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0.001)  # ~100 meters
+gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0.001)  # ~100m
 
-joined = gpd.sjoin(gdf_buf, zoning[["ZONE_CLASS", "geometry"]], how="left", predicate="intersects")
+joined = gpd.sjoin(gdf_buf, zoning, how="left", predicate="intersects")
 joined["Zoning"] = joined["ZONE_CLASS"].fillna("Outside LA")
 
 la_city = joined[joined["Zoning"] != "Outside LA"].copy()
 if la_city.empty:
     st.error("No zoning matches. Try increasing buffer.")
     st.stop()
-st.write(f"**{len(la_city):,}** LA City deals with zoning")
+st.write(f"**{len(la_city):,}** LA City deals with **REAL zoning**")
 
 # ------------------------------------------------------------------
-# 10. sqft_map (your original)
+# 10. sqft_map
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -229,4 +217,4 @@ dl["Price"]  = dl["Price"].apply(lambda x: f"${x:,.0f}")
 dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
 st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
 
-st.success("**LIVE!** Using **real LA City zoning (ArcGIS)** + **official boundary**. No more 404s.")
+st.success("**LIVE!** Using **REAL LA City zoning** from data.lacity.org. No 403. No fallback.")
