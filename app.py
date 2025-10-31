@@ -78,51 +78,7 @@ for _, r in gdf.iterrows():
 st_folium(m_debug, width=800, height=400, key="debug_raw")
 
 # ------------------------------------------------------------------
-# 6. LA CITY ZONING AS BOUNDARY — FROM GITHUB RELEASE (440 MB)
-# ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
-def load_zoning():
-    url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
-    cache_file = "zoning_cache.geojson"
-    
-    if os.path.exists(cache_file):
-        try:
-            gdf = gpd.read_file(cache_file)
-            if gdf.crs is None:
-                gdf.set_crs("EPSG:4326", inplace=True)
-            return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
-        except:
-            pass  # force re-download if corrupt
-
-    try:
-        with requests.get(url, stream=True, timeout=600) as r:
-            r.raise_for_status()
-            with open(cache_file, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-        gdf = gpd.read_file(cache_file)
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:4326", inplace=True)
-        return gdf[["ZONE_CLASS", "geometry"]].to_crs("EPSG:4326")
-    except Exception as e:
-        st.error(f"Failed to load zoning file: {e}")
-        st.stop()
-
-zoning = load_zoning()
-st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons (used as boundary)")
-
-# ------------------------------------------------------------------
-# 7. Filter to LA City using Zoning
-# ------------------------------------------------------------------
-gdf_la = gpd.sjoin(gdf.to_crs("EPSG:4326"), zoning.to_crs("EPSG:4326"), how="inner", predicate="intersects")
-
-if gdf_la.empty:
-    st.error("**No points inside LA City zoning.**\n→ Check MLS CSV lat/lon or ensure zoning file is valid.")
-    st.stop()
-st.success(f"**{len(gdf_la):,}** points inside LA City (using zoning polygons)")
-
-# ------------------------------------------------------------------
-# 8. REAL LA CITY ZONING — FROM GITHUB RELEASE (440 MB) — FIXED
+# 6. LA CITY ZONING — FROM GITHUB RELEASE (440 MB) — FIXED & FINAL
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
@@ -140,6 +96,8 @@ def load_zoning():
     try:
         with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            st.write(f"Downloading {total/1e6:.1f} MB...")
             with open(cache_file, "wb") as f:
                 for chunk in r.iter_content(8192):
                     f.write(chunk)
@@ -151,34 +109,47 @@ def load_zoning():
 
 def _fix_zoning_gdf(gdf):
     if gdf.crs is None:
-        gdf.set_crs("EPSG:4326", inplace=True)
+        gdf = gdf.set_crs("EPSG:4326")
     gdf = gdf.to_crs("EPSG:4326")
     
-    # DEBUG: Show column names
-    cols = list(gdf.columns)
-    st.write(f"**Zoning file columns:** {cols}")
-    
     # Auto-detect zoning column
-    zone_col = None
-    for col in cols:
-        lower = col.lower()
-        if any(k in lower for k in ['zone', 'zoning', 'class']):
-            zone_col = col
-            break
-    
-    if zone_col is None:
-        st.error("No zoning column found! Expected: ZONE_CLASS, ZONING, ZONE, etc.")
+    cols = [c for c in gdf.columns if c.lower() in ['zone_class', 'zoning', 'zone', 'class', 'zonecode']]
+    if not cols:
+        st.error(f"No zoning column found! Columns: {list(gdf.columns)}")
         st.stop()
     
+    zone_col = cols[0]
     st.write(f"**Using zoning column:** `{zone_col}`")
-    gdf["ZONE_CLASS"] = gdf[zone_col]  # standardize
-    return gdf[["ZONE_CLASS", "geometry"]]
+    gdf["ZONE_CLASS"] = gdf[zone_col].astype(str)
+    return gdf[["ZONE_CLASS", "geometry"]].copy()
 
 zoning = load_zoning()
-st.write(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
+st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 9. sqft_map
+# 7. Filter to LA City + Join Zoning
+# ------------------------------------------------------------------
+gdf_la = gpd.sjoin(gdf.to_crs("EPSG:4326"), zoning.to_crs("EPSG:4326"), how="inner", predicate="intersects")
+
+if gdf_la.empty:
+    st.error("**No points inside LA City zoning.**\n→ Check MLS CSV lat/lon or zoning file.")
+    st.stop()
+
+# Drop duplicate index from sjoin
+gdf_la = gdf_la.reset_index(drop=True)
+gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()]  # remove duplicate geometry cols
+
+st.success(f"**{len(gdf_la):,}** points inside LA City with zoning")
+
+# ------------------------------------------------------------------
+# 8. Create la_city with Zoning
+# ------------------------------------------------------------------
+la_city = gdf_la.copy()
+la_city["Zoning"] = la_city["ZONE_CLASS"]  # Now this exists!
+st.write("**Sample zoning values:**", la_city["Zoning"].unique()[:20])
+
+# ------------------------------------------------------------------
+# 9. sqft_map + Calculations
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -191,16 +162,18 @@ sqft_map = {
     'A1':108900, 'A2':43560
 }
 
-la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F]', '', regex=True).str.split("-").str[0].str.upper()
+# Clean base zone
+la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F].*', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
-la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(1, 20)
+la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(lower=1).apply(lambda x: min(x, 20))
 
-r1 = la_city["base"].str.startswith("R1")
+# Special R1 rule
+r1 = la_city["base"] == b"R1"
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
 )
 
-la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0)
+la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0).astype(int)
 
 # ------------------------------------------------------------------
 # 10. Filter
@@ -216,26 +189,31 @@ if not filtered.empty:
     for _, r in filtered.iterrows():
         color = "lime" if r.price_per_unit < 200_000 else "orange" if r.price_per_unit < 400_000 else "red"
         folium.CircleMarker(
-            [r.geometry.centroid.y, r.geometry.centroid.x],
+            [r.geometry.y, r.geometry.x],
             radius=6, color=color, fill=True,
             popup=folium.Popup(
                 f"<b>{r.address}</b><br>"
                 f"Price: ${r.price:,.0f}<br>"
                 f"$/Unit: ${r.price_per_unit:,.0f}<br>"
-                f"Max: {r.max_units:.0f}<br>"
+                f"Max Units: {r.max_units:.0f}<br>"
                 f"Zoning: {r.Zoning}",
                 max_width=300
             )
         ).add_to(m)
-    st_folium(m, width=1200, height=600)
+    st_folium(m, width=1200, height=600, key="final_map")
+else:
+    st.warning("No deals under selected $/unit threshold.")
 
 # ------------------------------------------------------------------
 # 12. Download
 # ------------------------------------------------------------------
-dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
-dl.columns = ["Address","Price","$/Unit","Max Units","Zoning"]
-dl["Price"]  = dl["Price"].apply(lambda x: f"${x:,.0f}")
-dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
-st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
+if not filtered.empty:
+    dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
+    dl.columns = ["Address","Price","$/Unit","Max Units","Zoning"]
+    dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
+    dl["$/Unit"] = dl["$/Unit"].apply(lambda x: f"${x:,.0f}")
+    st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
+else:
+    st.info("No data to download at current filter.")
 
-st.success("**LIVE!** Using **REAL LA City zoning** from GitHub Release (440 MB). No boundary API.")
+st.success("**LIVE!** Using **REAL LA City zoning** from GitHub (440 MB).")
