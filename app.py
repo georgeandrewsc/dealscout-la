@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# DealScout LA — REAL LA CITY ZONING + BOUNDARY
+# app.py — DealScout LA (Fixed for 1-row CSVs + Tiny Zoning Polygons)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -29,19 +29,19 @@ st.write(f"**{len(mls):,}** raw listings loaded")
 # ------------------------------------------------------------------
 # 2. Column indices (adjust if your CSV changes)
 # ------------------------------------------------------------------
-price_idx   = 132
-lat_idx     = 311
-lon_idx     = 254
-num_idx     = 522
-name_idx    = 520
-suffix_idx  = 523
-lot_idx     = mls.columns.get_loc("LotSizeSquareFeet")
+price_idx = 132
+lat_idx = 311
+lon_idx = 254
+num_idx = 522
+name_idx = 520
+suffix_idx = 523
+lot_idx = mls.columns.get_loc("LotSizeSquareFeet")
 
 # ------------------------------------------------------------------
 # 3. Clean data
 # ------------------------------------------------------------------
-mls["price"]    = pd.to_numeric(mls.iloc[:, price_idx], errors="coerce")
-mls["lot_sqft"] = pd.to_numeric(mls.iloc[:, lot_idx],   errors="coerce")
+mls["price"] = pd.to_numeric(mls.iloc[:, price_idx], errors="coerce")
+mls["lot_sqft"] = pd.to_numeric(mls.iloc[:, lot_idx], errors="coerce")
 if "acres" in mls.columns[lot_idx].lower():
     mls["lot_sqft"] *= 43560
 
@@ -51,10 +51,9 @@ mls["lon"] = pd.to_numeric(mls.iloc[:, lon_idx], errors="coerce")
 def clean(s):
     return s.astype(str).str.strip().replace({"nan":"","NaN":"","None":""}, regex=False)
 
-num  = clean(mls.iloc[:, num_idx])
+num = clean(mls.iloc[:, num_idx])
 name = clean(mls.iloc[:, name_idx])
-suf  = clean(mls.iloc[:, suffix_idx])
-
+suf = clean(mls.iloc[:, suffix_idx])
 mls["address"] = (num + " " + name + " " + suf).str.replace(r"\s+"," ",regex=True).str.strip()
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
@@ -65,7 +64,7 @@ mls["geometry"] = mls.apply(
     lambda r: Point(r.lon, r.lat) if pd.notnull(r.lon) and pd.notnull(r.lat) else None,
     axis=1
 )
-mls = mls.dropna(subset=["geometry","price","lot_sqft"])
+mls = mls.dropna(subset=["geometry", "price", "lot_sqft"])
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
@@ -87,6 +86,7 @@ if gdf_city.empty:
     st.error("**No MLS points inside the official LA City boundary.**\n"
              "Your CSV likely contains all of LA County, not just the City.")
     st.stop()
+
 st.success(f"**{len(gdf_city):,}** MLS points are inside **LA City**")
 
 # ------------------------------------------------------------------
@@ -96,7 +96,6 @@ st.success(f"**{len(gdf_city):,}** MLS points are inside **LA City**")
 def load_zoning():
     url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
-
     if os.path.exists(cache_file):
         try:
             gdf = gpd.read_file(cache_file)
@@ -104,7 +103,6 @@ def load_zoning():
             return _fix_zoning_gdf(gdf)
         except Exception as e:
             st.warning(f"Cache corrupt ({e}), redownloading...")
-
     try:
         with requests.get(url, stream=True, timeout=600) as r:
             r.raise_for_status()
@@ -123,8 +121,6 @@ def _fix_zoning_gdf(gdf):
     if gdf.crs is None:
         gdf.set_crs("EPSG:4326", inplace=True)
     gdf = gdf.to_crs("EPSG:4326")
-
-    # Auto-detect zoning column
     cols = [c for c in gdf.columns if c.lower() in ['zone_class','zoning','zone','class','zonecode']]
     if not cols:
         st.error(f"No zoning column found! Columns: {list(gdf.columns)}")
@@ -138,15 +134,36 @@ zoning = load_zoning()
 st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. Join city-filtered points with zoning
+# 7. Join city-filtered points with zoning (FIXED FOR 1-ROW + TINY POLYGONS)
 # ------------------------------------------------------------------
-gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
-gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
+BUFFER_FEET = 3  # ~1 meter buffer to catch edge/silver polygons
+gdf_city_buf = gdf_city.copy()
+gdf_city_buf["geometry"] = gdf_city_buf["geometry"].buffer(BUFFER_FEET * 0.3048 / 111320)  # ft → degrees
 
-if gdf_la.empty:
-    st.error("No points intersect zoning polygons even after city filter. Check lat/lon.")
+# Try buffered intersection
+joined = gpd.sjoin(gdf_city_buf, zoning, how="left", predicate="intersects")
+
+# Fallback: nearest zone if still missing
+no_zone = joined["ZONE_CLASS"].isna()
+if no_zone.any():
+    st.warning("Some points missed zoning polygons – using nearest zone as fallback.")
+    missing = joined[no_zone].copy()
+    zoning_sindex = zoning.sindex
+    for idx, row in missing.iterrows():
+        possible = list(zoning_sindex.nearest(row.geometry.bounds))
+        nearest_idx = zoning.iloc[possible].distance(row.geometry).idxmin()
+        joined.loc[idx, "ZONE_CLASS"] = zoning.loc[nearest_idx, "ZONE_CLASS"]
+
+# Final cleanup
+joined = joined.loc[:, ~joined.columns.duplicated()].reset_index(drop=True)
+joined = joined.dropna(subset=["ZONE_CLASS"])
+
+if joined.empty:
+    st.error("Even with buffer + nearest-zone fallback, no zoning was found. "
+             "Double-check lat/lon or the zoning GeoJSON.")
     st.stop()
 
+gdf_la = joined.copy()
 st.success(f"**{len(gdf_la):,}** points have a zoning code")
 
 # Create la_city for the rest of the script
@@ -157,7 +174,6 @@ la_city["Zoning"] = la_city["ZONE_CLASS"]
 # 8. DEBUG MAP – Zoning outlines (blue) + MLS points (red)
 # ------------------------------------------------------------------
 st.subheader("DEBUG: Zoning Polygons (blue) + MLS Points (red)")
-
 debug_map = folium.Map(location=[34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
 
 # Zoning outlines
@@ -230,7 +246,7 @@ if not filtered.empty:
             popup=folium.Popup(
                 f"<b>{r.address}</b><br>"
                 f"Price: ${r.price:,.0f}<br>"
-                f"$/Unit: ${r.price_per_unit:,.0f}<br>"
+                f"$ per Unit: ${r.price_per_unit:,.0f}<br>"
                 f"Max Units: {r.max_units:.0f}<br>"
                 f"Zoning: {r.Zoning}",
                 max_width=300
