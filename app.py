@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — DealScout LA (WORKING BOUNDARY URL + STRICT LA CITY)
+# app.py — DealScout LA (UPDATED BOUNDARY URL + STRICT LA CITY)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -71,11 +71,11 @@ mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat), axis=1)
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. OFFICIAL LA CITY BOUNDARY (NEW WORKING URL — 2024)
+# 5. OFFICIAL LA CITY BOUNDARY (NEW STABLE URL — 2025 UPDATE)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Loading LA City boundary…", ttl=24*3600)
 def load_la_city_boundary():
-    url = "https://geohub.lacity.org/api/geospatial/4u3e-7v6k?method=export&format=geojson"
+    url = "https://catalog.data.gov/dataset/3b6f4d16a9e34b9a8c5e4a27e8f5e6a7_0.geojson"
     try:
         gdf = gpd.read_file(url)
         if gdf.crs is None:
@@ -87,7 +87,7 @@ def load_la_city_boundary():
         st.stop()
 
 la_city_boundary = load_la_city_boundary()
-st.write("**Official LA City boundary loaded (2024)**")
+st.write("**Official LA City boundary loaded (updated Feb 2025)**")
 
 # STRICT FILTER: Only points INSIDE LA City
 gdf_city = gdf[gdf.geometry.within(la_city_boundary)].copy()
@@ -233,4 +233,4 @@ if not filtered.empty:
 else:
     st.info("No data to download at current filter.")
 
-st.success("**LIVE!** Using **official 2024 LA City boundary** + **real zoning** (cached).")
+st.success("**LIVE!** Using **official Feb 2025 LA City boundary** + **real zoning** (cached).")
