@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — DealScout LA (STRICT LA CITY ONLY)
+# app.py — DealScout LA (WORKING BOUNDARY URL + STRICT LA CITY)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -71,29 +71,31 @@ mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat), axis=1)
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. OFFICIAL LA CITY BOUNDARY (PUBLIC, DIRECT GEOJSON)
+# 5. OFFICIAL LA CITY BOUNDARY (NEW WORKING URL — 2024)
 # ------------------------------------------------------------------
 @st.cache_data(show_spinner="Loading LA City boundary…", ttl=24*3600)
 def load_la_city_boundary():
-    url = "https://data.lacity.org/api/geospatial/3b6f4d16a9e34b9a8c5e4a27e8f5e6a7?format=geojson"
+    url = "https://geohub.lacity.org/api/geospatial/4u3e-7v6k?method=export&format=geojson"
     try:
         gdf = gpd.read_file(url)
         if gdf.crs is None:
             gdf.set_crs("EPSG:4326", inplace=True)
+        # Dissolve to single polygon for fast filtering
         return gdf.to_crs("EPSG:4326").dissolve().geometry.iloc[0]
     except Exception as e:
-        st.error(f"Failed to load LA City boundary: {e}")
+        st.error(f"Failed to load LA City boundary: {e}\nTry refreshing or check your connection.")
         st.stop()
 
 la_city_boundary = load_la_city_boundary()
-st.write("**Official LA City boundary loaded**")
+st.write("**Official LA City boundary loaded (2024)**")
 
 # STRICT FILTER: Only points INSIDE LA City
 gdf_city = gdf[gdf.geometry.within(la_city_boundary)].copy()
 
 if gdf_city.empty:
     st.error("**No MLS points inside LA City.**\n"
-             "Your CSV likely contains LA County, not just the City.")
+             "Your CSV likely contains LA County, not just the City.\n"
+             "Tip: Verify lat/lon range ~33.7–34.3 lat, -118.6–-118.1 lon.")
     st.stop()
 
 st.success(f"**{len(gdf_city):,}** points are **inside LA City**")
@@ -110,52 +112,58 @@ def load_zoning():
         try:
             gdf = gpd.read_file(cache_file)
             st.write("**Using cached zoning file**")
-            return _fix_zoning(gdf)
-        except:
-            st.warning("Cache corrupt – redownloading…")
-    with requests.get(ZONING_URL, stream=True, timeout=600) as r:
-        r.raise_for_status()
-        total = int(r.headers.get('content-length', 0))
-        with st.spinner(f"Downloading {total/1e6:.1f} MB…"):
-            with open(cache_file, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-    gdf = gpd.read_file(cache_file)
-    return _fix_zoning(gdf)
+            return _fix_zoning_gdf(gdf)
+        except Exception as e:
+            st.warning(f"Cache corrupt ({e}), redownloading...")
+    try:
+        with requests.get(ZONING_URL, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            with st.spinner(f"Downloading {total/1e6:.1f} MB…"):
+                with open(cache_file, "wb") as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+        gdf = gpd.read_file(cache_file)
+        return _fix_zoning_gdf(gdf)
+    except Exception as e:
+        st.error(f"Failed to load zoning file: {e}")
+        st.stop()
 
-def _fix_zoning(gdf):
+def _fix_zoning_gdf(gdf):
     if gdf.crs is None:
         gdf.set_crs("EPSG:4326", inplace=True)
     gdf = gdf.to_crs("EPSG:4326")
+    # Auto-detect zoning column
     cols = [c for c in gdf.columns if c.lower() in ['zone_class','zoning','zone','class','zonecode']]
     if not cols:
-        st.error("No zoning column found in file.")
+        st.error(f"No zoning column found! Columns: {list(gdf.columns)}")
         st.stop()
     zone_col = cols[0]
+    st.write(f"**Using zoning column:** `{zone_col}`")
     gdf["ZONE_CLASS"] = gdf[zone_col].astype(str)
     return gdf[["ZONE_CLASS", "geometry"]].copy()
 
 zoning = load_zoning()
-st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
+st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. JOIN: Strict intersection (no buffer, no fallback)
+# 7. Join city-filtered points with zoning (strict intersects)
 # ------------------------------------------------------------------
-with st.spinner("Joining points to zoning…"):
-    gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
-    gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
+gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
+gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
 
 if gdf_la.empty:
-    st.error("No points intersect zoning polygons. Check lat/lon.")
+    st.error("No points intersect zoning polygons even after city filter. Check lat/lon.")
     st.stop()
 
-st.success(f"**{len(gdf_la):,}** points have zoning")
+st.success(f"**{len(gdf_la):,}** points have a zoning code")
 
+# Create la_city for the rest of the script
 la_city = gdf_la.copy()
 la_city["Zoning"] = la_city["ZONE_CLASS"]
 
 # ------------------------------------------------------------------
-# 8. Unit calculations
+# 8. sqft_map + unit calculations
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -167,27 +175,24 @@ sqft_map = {
     'RMP':20000, 'MR1':400, 'M1':400, 'MR2':200, 'M2':200,
     'A1':108900, 'A2':43560
 }
-
 la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F].*', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(lower=1).apply(lambda x: min(x, 20))
-
 # Special R1 rule
 r1 = la_city["base"] == "R1"
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
 )
-
 la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0).astype(int)
 
 # ------------------------------------------------------------------
-# 9. Filter by $/unit
+# 9. Filter by max $/unit
 # ------------------------------------------------------------------
 max_ppu = st.sidebar.slider("Max $/unit", 0, 1_000_000, 300_000, 25_000)
 filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # ------------------------------------------------------------------
-# 10. Final map (clustered)
+# 10. Final map of deals
 # ------------------------------------------------------------------
 if not filtered.empty:
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
@@ -195,7 +200,8 @@ if not filtered.empty:
     for _, r in filtered.iterrows():
         color = "lime" if r.price_per_unit < 200_000 else "orange" if r.price_per_unit < 400_000 else "red"
         folium.CircleMarker(
-            [r.geometry.y, r.geometry.x], radius=6, color=color, fill=True,
+            [r.geometry.y, r.geometry.x],
+            radius=6, color=color, fill=True,
             popup=folium.Popup(
                 f"<b>{r.address}</b><br>"
                 f"Price: ${r.price:,.0f}<br>"
@@ -205,6 +211,7 @@ if not filtered.empty:
                 max_width=300
             )
         ).add_to(cluster)
+    st.subheader("LA City Deals Map")
     st_folium(m, width=1200, height=600, key="final_deals")
 else:
     st.warning("No deals under the selected $/unit threshold.")
@@ -226,4 +233,4 @@ if not filtered.empty:
 else:
     st.info("No data to download at current filter.")
 
-st.success("**LIVE!** Strict **LA City only** + **real zoning**.")
+st.success("**LIVE!** Using **official 2024 LA City boundary** + **real zoning** (cached).")
