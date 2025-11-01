@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — DealScout LA (100% Reliable Zoning + Scalable)
+# app.py — DealScout LA (STRICT LA CITY ONLY)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -39,14 +39,10 @@ suffix_idx = 523
 lot_idx  = mls.columns.get_loc("LotSizeSquareFeet")
 
 # ------------------------------------------------------------------
-# 3. Clean data (keep only needed columns early)
+# 3. Clean data
 # ------------------------------------------------------------------
-cols_to_keep = [
-    mls.columns[price_idx], mls.columns[lat_idx], mls.columns[lon_idx],
-    mls.columns[num_idx], mls.columns[name_idx], mls.columns[suffix_idx],
-    mls.columns[lot_idx]
-]
-mls = mls[cols_to_keep].copy()
+cols = [mls.columns[i] for i in (price_idx, lat_idx, lon_idx, num_idx, name_idx, suffix_idx, lot_idx)]
+mls = mls[cols].copy()
 
 mls["price"] = pd.to_numeric(mls.iloc[:, 0], errors="coerce")
 mls["lot_sqft"] = pd.to_numeric(mls.iloc[:, 6], errors="coerce")
@@ -66,133 +62,100 @@ mls["address"] = (
 ).str.replace(r"\s+", " ", regex=True).str.strip()
 mls["address"] = mls["address"].replace("", "Unknown Address")
 
-# Drop rows missing core data
 mls = mls.dropna(subset=["price", "lot_sqft", "lat", "lon", "address"])
 
 # ------------------------------------------------------------------
 # 4. Points → GeoDataFrame
 # ------------------------------------------------------------------
-mls["geometry"] = mls.apply(
-    lambda r: Point(r.lon, r.lat), axis=1
-)
+mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat), axis=1)
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. LA CITY BOUNDARY
+# 5. OFFICIAL LA CITY BOUNDARY (PUBLIC, DIRECT GEOJSON)
 # ------------------------------------------------------------------
-@st.cache_data
+@st.cache_data(show_spinner="Loading LA City boundary…", ttl=24*3600)
 def load_la_city_boundary():
-    url = "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/los-angeles.geojson"
-    gdf = gpd.read_file(url)
-    if gdf.crs is None:
-        gdf.set_crs("EPSG:4326", inplace=True)
-    return gdf.to_crs("EPSG:4326")
+    url = "https://data.lacity.org/api/geospatial/3b6f4d16a9e34b9a8c5e4a27e8f5e6a7?format=geojson"
+    try:
+        gdf = gpd.read_file(url)
+        if gdf.crs is None:
+            gdf.set_crs("EPSG:4326", inplace=True)
+        return gdf.to_crs("EPSG:4326").dissolve().geometry.iloc[0]
+    except Exception as e:
+        st.error(f"Failed to load LA City boundary: {e}")
+        st.stop()
 
-la_boundary = load_la_city_boundary()
-st.write(f"**LA City boundary loaded:** {len(la_boundary)} polygon(s)")
+la_city_boundary = load_la_city_boundary()
+st.write("**Official LA City boundary loaded**")
 
-gdf_city = gpd.sjoin(gdf, la_boundary, how="inner", predicate="within")
+# STRICT FILTER: Only points INSIDE LA City
+gdf_city = gdf[gdf.geometry.within(la_city_boundary)].copy()
+
 if gdf_city.empty:
-    st.error("**No MLS points inside LA City.** Your CSV is likely LA County.")
+    st.error("**No MLS points inside LA City.**\n"
+             "Your CSV likely contains LA County, not just the City.")
     st.stop()
-st.success(f"**{len(gdf_city):,}** points inside **LA City**")
+
+st.success(f"**{len(gdf_city):,}** points are **inside LA City**")
 
 # ------------------------------------------------------------------
-# 6. REAL LA CITY ZONING (cached)
+# 6. REAL LA CITY ZONING (cached from GitHub Release)
 # ------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading LA City zoning (440 MB)…", ttl=24*3600)
+ZONING_URL = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
+
+@st.cache_data(show_spinner="Downloading zoning (440 MB)…", ttl=24*3600)
 def load_zoning():
-    url = "https://github.com/georgeandrewsc/dealscout-la/releases/download/v1.0-zoning/Zoning.geojson"
     cache_file = "zoning_cache.geojson"
     if os.path.exists(cache_file):
         try:
             gdf = gpd.read_file(cache_file)
             st.write("**Using cached zoning file**")
-            return _fix_zoning_gdf(gdf)
-        except Exception as e:
-            st.warning(f"Cache corrupt ({e}), redownloading...")
-    try:
-        with requests.get(url, stream=True, timeout=600) as r:
-            r.raise_for_status()
-            total = int(r.headers.get('content-length', 0))
-            with st.spinner(f"Downloading {total/1e6:.1f} MB…"):
-                with open(cache_file, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
-        gdf = gpd.read_file(cache_file)
-        return _fix_zoning_gdf(gdf)
-    except Exception as e:
-        st.error(f"Failed to load zoning: {e}")
-        st.stop()
+            return _fix_zoning(gdf)
+        except:
+            st.warning("Cache corrupt – redownloading…")
+    with requests.get(ZONING_URL, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        total = int(r.headers.get('content-length', 0))
+        with st.spinner(f"Downloading {total/1e6:.1f} MB…"):
+            with open(cache_file, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+    gdf = gpd.read_file(cache_file)
+    return _fix_zoning(gdf)
 
-def _fix_zoning_gdf(gdf):
+def _fix_zoning(gdf):
     if gdf.crs is None:
         gdf.set_crs("EPSG:4326", inplace=True)
     gdf = gdf.to_crs("EPSG:4326")
     cols = [c for c in gdf.columns if c.lower() in ['zone_class','zoning','zone','class','zonecode']]
     if not cols:
-        st.error(f"No zoning column! Columns: {list(gdf.columns)}")
+        st.error("No zoning column found in file.")
         st.stop()
     zone_col = cols[0]
-    st.write(f"**Using zoning column:** `{zone_col}`")
     gdf["ZONE_CLASS"] = gdf[zone_col].astype(str)
     return gdf[["ZONE_CLASS", "geometry"]].copy()
 
 zoning = load_zoning()
-st.success(f"**REAL Zoning loaded:** {len(zoning):,} polygons")
+st.write(f"**Zoning loaded:** {len(zoning):,} polygons")
 
 # ------------------------------------------------------------------
-# 7. JOIN: Buffer + Nearest Fallback (100% Success)
+# 7. JOIN: Strict intersection (no buffer, no fallback)
 # ------------------------------------------------------------------
-BUFFER_FEET = 3
-gdf_city_buf = gdf_city.copy()
-gdf_city_buf["geometry"] = gdf_city_buf["geometry"].buffer(BUFFER_FEET * 0.3048 / 111320)
+with st.spinner("Joining points to zoning…"):
+    gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
+    gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
 
-with st.spinner("Joining points to zoning (buffered)…"):
-    joined = gpd.sjoin(gdf_city_buf, zoning, how="left", predicate="intersects")
-
-# Nearest fallback
-no_zone = joined["ZONE_CLASS"].isna()
-if no_zone.any():
-    st.warning(f"{no_zone.sum()} points missed – using nearest zone.")
-    missing = joined[no_zone].copy()
-    zoning_sindex = zoning.sindex
-    for idx, row in missing.iterrows():
-        nearest_idx = zoning.iloc[list(zoning_sindex.nearest(row.geometry.bounds))].distance(row.geometry).idxmin()
-        joined.loc[idx, "ZONE_CLASS"] = zoning.loc[nearest_idx, "ZONE_CLASS"]
-
-joined = joined.loc[:, ~joined.columns.duplicated()].reset_index(drop=True)
-joined = joined.dropna(subset=["ZONE_CLASS"])
-
-if joined.empty:
-    st.error("No zoning found even with fallback. Check coordinates.")
+if gdf_la.empty:
+    st.error("No points intersect zoning polygons. Check lat/lon.")
     st.stop()
 
-gdf_la = joined.copy()
 st.success(f"**{len(gdf_la):,}** points have zoning")
 
 la_city = gdf_la.copy()
 la_city["Zoning"] = la_city["ZONE_CLASS"]
 
 # ------------------------------------------------------------------
-# 8. DEBUG MAP
-# ------------------------------------------------------------------
-st.subheader("DEBUG: Zoning (blue) + MLS Points (red)")
-debug_map = folium.Map(location=[34.05, -118.24], zoom_start=10, tiles="CartoDB positron")
-folium.GeoJson(
-    zoning,
-    style_function=lambda x: {"fillColor": "transparent", "color": "deepskyblue", "weight": 1.2, "opacity": 0.6},
-    tooltip=folium.GeoJsonTooltip(fields=["ZONE_CLASS"], aliases=["Zone:"])
-).add_to(debug_map)
-for _, r in gdf_city.iterrows():
-    folium.CircleMarker(
-        [r.geometry.y, r.geometry.x], radius=4, color="red", fill=True,
-        popup=folium.Popup(f"<b>{r.address}</b>", max_width=200)
-    ).add_to(debug_map)
-st_folium(debug_map, width=1000, height=550, key="debug")
-
-# ------------------------------------------------------------------
-# 9. Unit Calculations
+# 8. Unit calculations
 # ------------------------------------------------------------------
 sqft_map = {
     'CM':800, 'C1':800, 'C2':400, 'C4':400, 'C5':400,
@@ -209,6 +172,7 @@ la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F].*', '', regex=True)
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(lower=1).apply(lambda x: min(x, 20))
 
+# Special R1 rule
 r1 = la_city["base"] == "R1"
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
@@ -217,13 +181,13 @@ la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
 la_city["price_per_unit"] = (la_city["price"] / la_city["max_units"]).round(0).astype(int)
 
 # ------------------------------------------------------------------
-# 10. Filter
+# 9. Filter by $/unit
 # ------------------------------------------------------------------
 max_ppu = st.sidebar.slider("Max $/unit", 0, 1_000_000, 300_000, 25_000)
 filtered = la_city[la_city["price_per_unit"] <= max_ppu].copy()
 
 # ------------------------------------------------------------------
-# 11. FINAL MAP (with clustering)
+# 10. Final map (clustered)
 # ------------------------------------------------------------------
 if not filtered.empty:
     m = folium.Map([34.05, -118.24], zoom_start=11, tiles="CartoDB positron")
@@ -241,20 +205,25 @@ if not filtered.empty:
                 max_width=300
             )
         ).add_to(cluster)
-    st_folium(m, width=1200, height=600, key="final")
+    st_folium(m, width=1200, height=600, key="final_deals")
 else:
-    st.warning("No deals under threshold.")
+    st.warning("No deals under the selected $/unit threshold.")
 
 # ------------------------------------------------------------------
-# 12. Download
+# 11. Download CSV
 # ------------------------------------------------------------------
 if not filtered.empty:
     dl = filtered[["address","price","price_per_unit","max_units","Zoning"]].copy()
     dl.columns = ["Address","Price","$ per Unit","Max Units","Zoning"]
     dl["Price"] = dl["Price"].apply(lambda x: f"${x:,.0f}")
     dl["$ per Unit"] = dl["$ per Unit"].apply(lambda x: f"${x:,.0f}")
-    st.download_button("Download CSV", dl.to_csv(index=False), "LA_Deals.csv", "text/csv")
+    st.download_button(
+        "Download CSV",
+        dl.to_csv(index=False),
+        "LA_Deals.csv",
+        "text/csv"
+    )
 else:
-    st.info("No data to download.")
+    st.info("No data to download at current filter.")
 
-st.success("**LIVE!** 100% zoning coverage with buffer + nearest fallback.")
+st.success("**LIVE!** Strict **LA City only** + **real zoning**.")
