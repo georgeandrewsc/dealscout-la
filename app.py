@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py — DealScout LA (UPDATED BOUNDARY URL + STRICT LA CITY)
+# app.py — DealScout LA (ROBUST BOUNDARY + STRICT LA CITY)
 # --------------------------------------------------------------
 
 import streamlit as st
@@ -11,6 +11,7 @@ from streamlit_folium import st_folium
 from shapely.geometry import Point
 from folium.plugins import MarkerCluster
 import os
+import urllib.error
 
 st.set_page_config(page_title="DealScout LA", layout="wide")
 st.title("DealScout LA")
@@ -71,23 +72,49 @@ mls["geometry"] = mls.apply(lambda r: Point(r.lon, r.lat), axis=1)
 gdf = gpd.GeoDataFrame(mls, geometry="geometry", crs="EPSG:4326")
 
 # ------------------------------------------------------------------
-# 5. OFFICIAL LA CITY BOUNDARY (NEW STABLE URL — 2025 UPDATE)
+# 5. LA CITY BOUNDARY – ROBUST (download + local cache)
 # ------------------------------------------------------------------
-@st.cache_data(show_spinner="Loading LA City boundary…", ttl=24*3600)
+BOUNDARY_URL = "https://catalog.data.gov/dataset/3b6f4d16a9e34b9a8c5e4a27e8f5e6a7_0.geojson"
+CACHE_FILE   = "la_city_boundary_cache.geojson"
+
+@st.cache_data(show_spinner=False)
 def load_la_city_boundary():
-    url = "https://catalog.data.gov/dataset/3b6f4d16a9e34b9a8c5e4a27e8f5e6a7_0.geojson"
+    # 1. Try cached file first
+    if os.path.exists(CACHE_FILE):
+        try:
+            gdf = gpd.read_file(CACHE_FILE)
+            st.write("**Using cached LA City boundary**")
+            return _dissolve_boundary(gdf)
+        except Exception as e:
+            st.warning(f"Cache corrupt ({e}), will redownload...")
+
+    # 2. Download from official source
     try:
-        gdf = gpd.read_file(url)
-        if gdf.crs is None:
-            gdf.set_crs("EPSG:4326", inplace=True)
-        # Dissolve to single polygon for fast filtering
-        return gdf.to_crs("EPSG:4326").dissolve().geometry.iloc[0]
+        with st.spinner("Downloading LA City boundary…"):
+            gdf = gpd.read_file(BOUNDARY_URL)
+        # Save for next run
+        gdf.to_file(CACHE_FILE, driver="GeoJSON")
+        st.write("**LA City boundary downloaded & cached**")
+        return _dissolve_boundary(gdf)
     except Exception as e:
-        st.error(f"Failed to load LA City boundary: {e}\nTry refreshing or check your connection.")
-        st.stop()
+        # 3. If download fails but cache exists → use old cache
+        if os.path.exists(CACHE_FILE):
+            st.warning(f"Download failed ({e}), using last cached boundary.")
+            gdf = gpd.read_file(CACHE_FILE)
+            return _dissolve_boundary(gdf)
+        else:
+            st.error(f"Failed to load LA City boundary: {e}\n"
+                     "Check internet or try again later.")
+            st.stop()
+
+def _dissolve_boundary(gdf):
+    if gdf.crs is None:
+        gdf.set_crs("EPSG:4326", inplace=True)
+    gdf = gdf.to_crs("EPSG:4326")
+    return gdf.dissolve().geometry.iloc[0]  # single polygon
 
 la_city_boundary = load_la_city_boundary()
-st.write("**Official LA City boundary loaded (updated Feb 2025)**")
+st.write("**LA City boundary ready**")
 
 # STRICT FILTER: Only points INSIDE LA City
 gdf_city = gdf[gdf.geometry.within(la_city_boundary)].copy()
@@ -95,7 +122,7 @@ gdf_city = gdf[gdf.geometry.within(la_city_boundary)].copy()
 if gdf_city.empty:
     st.error("**No MLS points inside LA City.**\n"
              "Your CSV likely contains LA County, not just the City.\n"
-             "Tip: Verify lat/lon range ~33.7–34.3 lat, -118.6–-118.1 lon.")
+             "Tip: LA City lat ≈ 33.7–34.3, lon ≈ -118.6–-118.1")
     st.stop()
 
 st.success(f"**{len(gdf_city):,}** points are **inside LA City**")
@@ -133,7 +160,6 @@ def _fix_zoning_gdf(gdf):
     if gdf.crs is None:
         gdf.set_crs("EPSG:4326", inplace=True)
     gdf = gdf.to_crs("EPSG:4326")
-    # Auto-detect zoning column
     cols = [c for c in gdf.columns if c.lower() in ['zone_class','zoning','zone','class','zonecode']]
     if not cols:
         st.error(f"No zoning column found! Columns: {list(gdf.columns)}")
@@ -153,12 +179,11 @@ gdf_la = gpd.sjoin(gdf_city, zoning, how="inner", predicate="intersects")
 gdf_la = gdf_la.loc[:, ~gdf_la.columns.duplicated()].reset_index(drop=True)
 
 if gdf_la.empty:
-    st.error("No points intersect zoning polygons even after city filter. Check lat/lon.")
+    st.error("No points intersect zoning polygons. Check lat/lon.")
     st.stop()
 
 st.success(f"**{len(gdf_la):,}** points have a zoning code")
 
-# Create la_city for the rest of the script
 la_city = gdf_la.copy()
 la_city["Zoning"] = la_city["ZONE_CLASS"]
 
@@ -178,7 +203,7 @@ sqft_map = {
 la_city["base"] = la_city["Zoning"].str.replace(r'[\[\](Q)F].*', '', regex=True).str.split("-").str[0].str.upper()
 la_city["sqft_per"] = la_city["base"].map(sqft_map).fillna(5000)
 la_city["max_units"] = (la_city["lot_sqft"] / la_city["sqft_per"]).clip(lower=1).apply(lambda x: min(x, 20))
-# Special R1 rule
+
 r1 = la_city["base"] == "R1"
 la_city.loc[r1, "max_units"] = la_city.loc[r1, "lot_sqft"].apply(
     lambda x: 4 if x >= 2400 else 3 if x >= 1000 else 2
@@ -233,4 +258,4 @@ if not filtered.empty:
 else:
     st.info("No data to download at current filter.")
 
-st.success("**LIVE!** Using **official Feb 2025 LA City boundary** + **real zoning** (cached).")
+st.success("**LIVE!** Using **cached LA City boundary** + **real zoning**.")
